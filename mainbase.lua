@@ -1,614 +1,504 @@
---[[
-    seroid.lua — VibeUI movement + camera utility panel
-    Defaults: speed 37, smooth movement on, FOV off, jump boost off.
-    UI library: https://sirmemegithub.com/RealSlimShady2000/VibeUI
+-- Luau | mainbase.lua | Roblox client runtime
+-- Insert after `local controls = {}` and before `-- Speed controls`.
+-- Client-only development visualizer: does not modify real character hitboxes,
+-- intercept Mouse.Target, spoof metatables, or manipulate RemoteEvents.
 
-    Note: this is a client-side utility. Games can override or validate movement
-    on the server. Use only where client-side modifications are permitted.
-]]
+local HitboxSection = VisualsTab:Section({
+    Name = "Hitbox Simulation",
+    Side = 2,
+})
 
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
-
-local player = Players.LocalPlayer
-if not player then
-    warn("[seroid] LocalPlayer is unavailable.")
-    return
-end
-
-local ENV = (type(getgenv) == "function" and getgenv()) or _G
-
--- Clean up an earlier copy before creating another one.
-if type(ENV.seroidCleanup) == "function" then
-    pcall(ENV.seroidCleanup)
-end
-
-local DEFAULTS = {
-    SpeedEnabled = true,
-    Speed = 37,
-    SmoothMovement = true,
-    Smoothing = 0.35,
-    GroundOnly = false,
-    PreserveVerticalVelocity = true,
-
-    JumpEnabled = false,
-    JumpMode = "Power",
-    JumpValue = 70,
-
-    FOVEnabled = false,
-    FOV = 85,
+local HitboxConfig = {
+    Enabled = false,
+    TargetPart = "HumanoidRootPart",
+    Shape = "Block",
+    Multiplier = 2.5,
+    PredictionTime = 0.10,
+    Transparency = 0.65,
+    ShowHighlight = true,
+    ShowHUD = true,
+    MaxDistance = 500,
+    UpdateInterval = 0.08,
 }
 
-local state = {}
-for key, value in pairs(DEFAULTS) do
-    state[key] = value
+local hitboxProxies = {}
+local hitboxHighlights = {}
+local hitboxElapsed = 0
+local hitboxGui
+local hitboxStatus = {
+    Targets = 0,
+    Visible = 0,
+    Blocked = 0,
+    Prediction = Vector3.zero,
+}
+
+local function removeHitboxVisuals()
+    for player, proxy in pairs(hitboxProxies) do
+        if proxy and proxy.Parent then
+            proxy:Destroy()
+        end
+        hitboxProxies[player] = nil
+    end
+
+    for player, highlight in pairs(hitboxHighlights) do
+        if highlight and highlight.Parent then
+            highlight:Destroy()
+        end
+        hitboxHighlights[player] = nil
+    end
 end
 
-local alive = true
-local connections = {}
-local originalJump = setmetatable({}, { __mode = "k" })
-local originalFOV = nil
-local VibeUI -- forward declaration used by notify()
-local currentCamera = Workspace.CurrentCamera
-if currentCamera then
-    originalFOV = currentCamera.FieldOfView
-end
-
-local function track(connection)
-    table.insert(connections, connection)
-    return connection
-end
-
-local function notify(title, description, kind)
-    pcall(function()
-        VibeUI:Notification({
-            Title = title,
-            Description = description,
-            Type = kind or "info",
-            Duration = 3,
-        })
-    end)
-end
-
-local function getCharacter()
-    return player.Character
-end
-
-local function getHumanoid()
-    local character = getCharacter()
-    return character and character:FindFirstChildOfClass("Humanoid")
-end
-
-local function getRoot()
-    local character = getCharacter()
+local function getTargetPart(character)
     if not character then
         return nil
     end
 
+    if HitboxConfig.TargetPart == "Head" then
+        return character:FindFirstChild("Head")
+    end
+
+    if HitboxConfig.TargetPart == "Torso" then
+        return character:FindFirstChild("UpperTorso")
+            or character:FindFirstChild("Torso")
+    end
+
     return character:FindFirstChild("HumanoidRootPart")
-        or character.PrimaryPart
-        or character:FindFirstChild("Torso")
-        or character:FindFirstChild("UpperTorso")
 end
 
-local function captureJump(humanoid)
-    if humanoid and not originalJump[humanoid] then
-        originalJump[humanoid] = {
-            UseJumpPower = humanoid.UseJumpPower,
-            JumpPower = humanoid.JumpPower,
-            JumpHeight = humanoid.JumpHeight,
-        }
+local function getOrCreateProxy(targetPlayer)
+    local proxy = hitboxProxies[targetPlayer]
+
+    if proxy and proxy.Parent then
+        return proxy
     end
+
+    proxy = Instance.new("Part")
+    proxy.Name = "seroid_HitboxPreview"
+    proxy.Anchored = true
+    proxy.CanCollide = false
+    proxy.CanTouch = false
+    proxy.CanQuery = false
+    proxy.CastShadow = false
+    proxy.Massless = true
+    proxy.Material = Enum.Material.Neon
+    proxy.Color = Color3.fromRGB(80, 220, 120)
+    proxy.Transparency = HitboxConfig.Transparency
+    proxy.Size = Vector3.new(4, 5, 4)
+    proxy.Shape = Enum.PartType.Block
+    proxy.Parent = workspace
+
+    hitboxProxies[targetPlayer] = proxy
+    return proxy
 end
 
-local function applyJump()
-    local humanoid = getHumanoid()
-    if not humanoid then
-        return
+local function getOrCreateHighlight(targetPlayer, character)
+    local existing = hitboxHighlights[targetPlayer]
+
+    if existing and existing.Parent == character then
+        return existing
     end
 
-    captureJump(humanoid)
-
-    if not state.JumpEnabled then
-        local saved = originalJump[humanoid]
-        if saved then
-            pcall(function()
-                humanoid.UseJumpPower = saved.UseJumpPower
-                humanoid.JumpPower = saved.JumpPower
-                humanoid.JumpHeight = saved.JumpHeight
-            end)
-        end
-        return
+    if existing then
+        existing:Destroy()
     end
 
-    pcall(function()
-        if state.JumpMode == "Height" then
-            humanoid.UseJumpPower = false
-            humanoid.JumpHeight = state.JumpValue
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "seroid_TargetDiagnostic"
+    highlight.Adornee = character
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency = 0.82
+    highlight.OutlineTransparency = 0.15
+    highlight.Parent = character
+
+    hitboxHighlights[targetPlayer] = highlight
+    return highlight
+end
+
+local function inspectTarget(targetPlayer, targetPart, localRoot)
+    local offset = targetPart.AssemblyLinearVelocity
+        * HitboxConfig.PredictionTime
+
+    -- Bound prediction so sudden physics impulses cannot move the preview
+    -- arbitrarily far from the character.
+    if offset.Magnitude > 12 then
+        offset = offset.Unit * 12
+    end
+
+    local predictedPosition = targetPart.Position + offset
+    local rayDirection = targetPart.Position - localRoot.Position
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {
+        player.Character,
+        targetPlayer.Character,
+    }
+    params.IgnoreWater = false
+
+    local obstruction = workspace:Raycast(
+        localRoot.Position,
+        rayDirection,
+        params
+    )
+
+    local color
+    local status
+
+    if not obstruction then
+        color = Color3.fromRGB(80, 220, 120)
+        status = "VISIBLE"
+    else
+        local obstacle = obstruction.Instance
+        local name = string.lower(obstacle.Name)
+
+        -- This is a configurable diagnostic heuristic, not proof that
+        -- the weapon or game permits penetration through the obstacle.
+        local heuristicPenetrable =
+            string.find(name, "glass", 1, true) ~= nil
+            or string.find(name, "wood", 1, true) ~= nil
+            or obstacle.Material == Enum.Material.Glass
+            or obstacle.Material == Enum.Material.Wood
+            or obstacle.Material == Enum.Material.WoodPlanks
+
+        if heuristicPenetrable then
+            color = Color3.fromRGB(255, 205, 65)
+            status = "POSSIBLE OBSTRUCTION"
         else
-            humanoid.UseJumpPower = true
-            humanoid.JumpPower = state.JumpValue
+            color = Color3.fromRGB(255, 85, 85)
+            status = "BLOCKED"
         end
-    end)
+    end
+
+    return predictedPosition, offset, color, status
 end
 
-local function applyFOV()
-    local camera = Workspace.CurrentCamera
-    if not camera then
+local function destroyTargetVisual(targetPlayer)
+    local proxy = hitboxProxies[targetPlayer]
+    if proxy then
+        proxy:Destroy()
+        hitboxProxies[targetPlayer] = nil
+    end
+
+    local highlight = hitboxHighlights[targetPlayer]
+    if highlight then
+        highlight:Destroy()
+        hitboxHighlights[targetPlayer] = nil
+    end
+end
+
+local function createHitboxHUD()
+    local playerGui = player:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then
         return
     end
 
-    if state.FOVEnabled then
-        camera.FieldOfView = math.clamp(state.FOV, 50, 120)
-    elseif originalFOV then
-        camera.FieldOfView = originalFOV
+    if hitboxGui then
+        hitboxGui:Destroy()
+    end
+
+    hitboxGui = Instance.new("ScreenGui")
+    hitboxGui.Name = "seroid_HitboxDiagnostics"
+    hitboxGui.ResetOnSpawn = false
+    hitboxGui.DisplayOrder = 20
+    hitboxGui.Parent = playerGui
+
+    local panel = Instance.new("Frame")
+    panel.Name = "Metrics"
+    panel.AnchorPoint = Vector2.new(1, 0)
+    panel.Position = UDim2.new(1, -16, 0, 16)
+    panel.Size = UDim2.fromOffset(245, 118)
+    panel.BackgroundColor3 = Color3.fromRGB(18, 20, 29)
+    panel.BackgroundTransparency = 0.12
+    panel.BorderSizePixel = 0
+    panel.Parent = hitboxGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = panel
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Readout"
+    label.Position = UDim2.fromOffset(10, 8)
+    label.Size = UDim2.new(1, -20, 1, -16)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.Code
+    label.TextSize = 13
+    label.TextColor3 = Color3.fromRGB(230, 232, 245)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Top
+    label.Text = "SEROID // HITBOX DIAGNOSTICS"
+    label.Parent = panel
+end
+
+local function updateHitboxHUD()
+    if not HitboxConfig.ShowHUD then
+        if hitboxGui then
+            hitboxGui.Enabled = false
+        end
+        return
+    end
+
+    if not hitboxGui or not hitboxGui.Parent then
+        createHitboxHUD()
+    end
+
+    if not hitboxGui then
+        return
+    end
+
+    hitboxGui.Enabled = true
+
+    local panel = hitboxGui:FindFirstChild("Metrics")
+    local label = panel and panel:FindFirstChild("Readout")
+
+    if label then
+        local p = hitboxStatus.Prediction
+
+        label.Text = string.format(
+            "SEROID // HITBOX DIAGNOSTICS\nTargets: %d | Visible: %d\nBlocked: %d | FPS: %d\nPrediction: %.2f, %.2f, %.2f\nMode: LOCAL VISUAL PREVIEW",
+            hitboxStatus.Targets,
+            hitboxStatus.Visible,
+            hitboxStatus.Blocked,
+            math.floor(1 / math.max(RunService.RenderStepped:Wait(), 1 / 240)),
+            p.X,
+            p.Y,
+            p.Z
+        )
     end
 end
 
--- Load the UI library with clear failure handling.
-local libraryURL =
-    "https://sirmemegithub.com/RealSlimShady2000/VibeUI/raw/branch/main/VibeUI.luau"
-
-local loadOK, libraryOrError = pcall(function()
-    assert(type(loadstring) == "function", "loadstring is unavailable in this environment")
-    local response = game:HttpGet(libraryURL)
-    local compile = loadstring(response)
-    assert(type(compile) == "function", "VibeUI source did not compile")
-    return compile()
-end)
-
-if not loadOK or type(libraryOrError) ~= "table" then
-    warn("[seroid] Could not load VibeUI:", libraryOrError)
-    return
-end
-
-VibeUI = libraryOrError
-
--- Appearance defaults must be set before creating the window.
-pcall(function()
-    VibeUI.Config.Rounded = true
-    VibeUI.Config.MobileToggle = true
-    VibeUI.Config.CustomCursor = true
-    VibeUI.Config.FadeSpeed = 0.20
-    VibeUI.Config.NotificationDuration = 4
-    VibeUI.Config.Tween.Time = 0.20
-    VibeUI:SetTheme({
-        Accent = Color3.fromRGB(145, 105, 255),
-        Background = Color3.fromRGB(16, 17, 25),
-    })
-    VibeUI:SetOutlines(true)
-    VibeUI:SetGlow(0.15)
-    VibeUI:SetNotificationSide("BottomRight")
-end)
-
-local Window = VibeUI:Window({
-    Title = "seroid",
-    Size = UDim2.fromOffset(700, 510),
-    Keybind = Enum.KeyCode.RightControl,
-    Layout = "Side",
-    Resizable = true,
-})
-
-local MovementTab = Window:Tab({ Name = "Movement", Columns = 2 })
-local SpeedSection = MovementTab:Section({ Name = "Speed Control", Side = 1 })
-local MotionSection = MovementTab:Section({ Name = "Movement Options", Side = 2 })
-local JumpSection = MovementTab:Section({ Name = "Jump Control", Side = 2 })
-
-local VisualsTab = Window:Tab({ Name = "Visuals", Columns = 2 })
-local CameraSection = VisualsTab:Section({ Name = "Camera", Side = 1 })
-local UtilitySection = VisualsTab:Section({ Name = "Utilities", Side = 2 })
-
-local ConfigTab = Window:Tab({ Name = "Profiles", Columns = 2 })
-local ProfileSection = ConfigTab:Section({ Name = "Quick Profiles", Side = 1 })
-local StatusSection = ConfigTab:Section({ Name = "Status & Safety", Side = 2 })
-
-local controls = {}
-
--- Speed controls
-controls.SpeedEnabled = SpeedSection:Toggle({
-    Name = "Enable speed",
-    Flag = "seroid_SpeedEnabled",
-    Default = DEFAULTS.SpeedEnabled,
+controls.HitboxEnabled = HitboxSection:Toggle({
+    Name = "Enable visual simulation",
+    Flag = "seroid_HitboxEnabled",
+    Default = false,
     Callback = function(value)
-        state.SpeedEnabled = value
-        ENV.SpeedEnabled = value
-        notify("Speed", value and "Movement boost enabled." or "Movement boost disabled.", "info")
-    end,
-})
-controls.SpeedEnabled:AddKeybind({
-    Flag = "seroid_SpeedKey",
-    Default = Enum.KeyCode.LeftControl,
-    Mode = "Toggle",
-})
+        HitboxConfig.Enabled = value
 
-controls.Speed = SpeedSection:Slider({
-    Name = "Speed",
-    Flag = "seroid_Speed",
-    Min = 8,
-    Max = 80,
-    Default = DEFAULTS.Speed,
-    Decimals = 1,
-    Suffix = " studs/s",
-    Callback = function(value)
-        state.Speed = math.clamp(value, 8, 80)
-        ENV.Speed = state.Speed
-    end,
-})
-
-controls.SpeedPreset = SpeedSection:Dropdown({
-    Name = "Speed preset",
-    Flag = "seroid_SpeedPreset",
-    Items = {
-        "Walk (16)",
-        "Run (28)",
-        "seroid (37)",
-        "Turbo (50)",
-        "Extreme (65)",
-    },
-    Default = "seroid (37)",
-    Callback = function(value)
-        local number = tonumber(string.match(value or "", "%((%d+)%)"))
-        if number then
-            controls.Speed:Set(number)
+        if not value then
+            removeHitboxVisuals()
+            hitboxStatus.Targets = 0
+            hitboxStatus.Visible = 0
+            hitboxStatus.Blocked = 0
         end
+
+        notify(
+            "Hitbox simulation",
+            value and "Local visual previews enabled."
+                or "Local visual previews disabled.",
+            "info"
+        )
     end,
 })
 
-local speedButtons = SpeedSection:Button()
-speedButtons:Add("Default speed", function()
-    controls.Speed:Set(DEFAULTS.Speed)
-    controls.SpeedPreset:Set("seroid (37)")
-    notify("Speed reset", "Speed set to 37.", "success")
-end)
-speedButtons:Add("Disable speed", function()
-    controls.SpeedEnabled:Set(false)
-end)
-
--- Movement quality options
-controls.SmoothMovement = MotionSection:Toggle({
-    Name = "Smooth acceleration",
-    Flag = "seroid_SmoothMovement",
-    Default = DEFAULTS.SmoothMovement,
+controls.HitboxTarget = HitboxSection:Dropdown({
+    Name = "Target part",
+    Flag = "seroid_HitboxTarget",
+    Items = { "Head", "HumanoidRootPart", "Torso" },
+    Default = HitboxConfig.TargetPart,
     Callback = function(value)
-        state.SmoothMovement = value
+        HitboxConfig.TargetPart = value
     end,
 })
 
-controls.Smoothing = MotionSection:Slider({
-    Name = "Smoothing strength",
-    Flag = "seroid_Smoothing",
-    Min = 0.05,
-    Max = 0.90,
-    Default = DEFAULTS.Smoothing,
+controls.HitboxShape = HitboxSection:Dropdown({
+    Name = "Preview shape",
+    Flag = "seroid_HitboxShape",
+    Items = { "Block", "Ball" },
+    Default = HitboxConfig.Shape,
+    Callback = function(value)
+        HitboxConfig.Shape = value
+    end,
+})
+
+controls.HitboxSize = HitboxSection:Slider({
+    Name = "Preview size multiplier",
+    Flag = "seroid_HitboxSize",
+    Min = 1,
+    Max = 8,
+    Default = HitboxConfig.Multiplier,
+    Decimals = 0.25,
+    Callback = function(value)
+        HitboxConfig.Multiplier = math.clamp(value, 1, 8)
+    end,
+})
+
+controls.HitboxPrediction = HitboxSection:Slider({
+    Name = "Prediction time",
+    Flag = "seroid_HitboxPrediction",
+    Min = 0,
+    Max = 0.30,
+    Default = HitboxConfig.PredictionTime,
+    Decimals = 0.01,
+    Callback = function(value)
+        HitboxConfig.PredictionTime = math.clamp(value, 0, 0.30)
+    end,
+})
+
+controls.HitboxTransparency = HitboxSection:Slider({
+    Name = "Preview transparency",
+    Flag = "seroid_HitboxTransparency",
+    Min = 0.10,
+    Max = 0.95,
+    Default = HitboxConfig.Transparency,
     Decimals = 0.05,
     Callback = function(value)
-        state.Smoothing = math.clamp(value, 0.05, 0.90)
+        HitboxConfig.Transparency = math.clamp(value, 0.10, 0.95)
     end,
 })
 
-controls.GroundOnly = MotionSection:Toggle({
-    Name = "Ground only",
-    Flag = "seroid_GroundOnly",
-    Default = DEFAULTS.GroundOnly,
-    Info = "Only apply the speed boost while grounded.",
+controls.HitboxHighlight = HitboxSection:Toggle({
+    Name = "Character highlight",
+    Flag = "seroid_HitboxHighlight",
+    Default = HitboxConfig.ShowHighlight,
     Callback = function(value)
-        state.GroundOnly = value
-    end,
-})
+        HitboxConfig.ShowHighlight = value
 
-controls.PreserveVerticalVelocity = MotionSection:Toggle({
-    Name = "Preserve vertical velocity",
-    Flag = "seroid_PreserveVertical",
-    Default = DEFAULTS.PreserveVerticalVelocity,
-    Info = "Avoid replacing the Y velocity used for falling or jumping.",
-    Callback = function(value)
-        state.PreserveVerticalVelocity = value
-    end,
-})
-
--- Jump controls
-controls.JumpEnabled = JumpSection:Toggle({
-    Name = "Enable jump boost",
-    Flag = "seroid_JumpEnabled",
-    Default = DEFAULTS.JumpEnabled,
-    Callback = function(value)
-        state.JumpEnabled = value
-        applyJump()
-    end,
-})
-
-controls.JumpMode = JumpSection:Dropdown({
-    Name = "Jump mode",
-    Flag = "seroid_JumpMode",
-    Items = { "Power", "Height" },
-    Default = DEFAULTS.JumpMode,
-    Callback = function(value)
-        state.JumpMode = value
-        applyJump()
-    end,
-})
-
-controls.JumpValue = JumpSection:Slider({
-    Name = "Jump value",
-    Flag = "seroid_JumpValue",
-    Min = 20,
-    Max = 150,
-    Default = DEFAULTS.JumpValue,
-    Decimals = 1,
-    Callback = function(value)
-        state.JumpValue = math.clamp(value, 20, 150)
-        applyJump()
-    end,
-})
-
-local jumpButtons = JumpSection:Button()
-jumpButtons:Add("Reset jump", function()
-    controls.JumpEnabled:Set(false)
-    controls.JumpMode:Set(DEFAULTS.JumpMode)
-    controls.JumpValue:Set(DEFAULTS.JumpValue)
-    applyJump()
-    notify("Jump reset", "Original jump settings restored.", "success")
-end)
-
--- Camera controls
-controls.FOVEnabled = CameraSection:Toggle({
-    Name = "Custom field of view",
-    Flag = "seroid_FOVEnabled",
-    Default = DEFAULTS.FOVEnabled,
-    Callback = function(value)
-        state.FOVEnabled = value
-        applyFOV()
-    end,
-})
-
-controls.FOV = CameraSection:Slider({
-    Name = "Field of view",
-    Flag = "seroid_FOV",
-    Min = 50,
-    Max = 120,
-    Default = DEFAULTS.FOV,
-    Decimals = 1,
-    Suffix = "°",
-    Callback = function(value)
-        state.FOV = math.clamp(value, 50, 120)
-        if state.FOVEnabled then
-            applyFOV()
+        if not value then
+            for _, highlight in pairs(hitboxHighlights) do
+                highlight:Destroy()
+            end
+            table.clear(hitboxHighlights)
         end
     end,
 })
 
-controls.FOVPreset = CameraSection:Dropdown({
-    Name = "FOV preset",
-    Flag = "seroid_FOVPreset",
-    Items = { "Default (70)", "Wide (85)", "Very wide (100)", "Max (120)" },
-    Default = "Wide (85)",
+controls.HitboxHUD = HitboxSection:Toggle({
+    Name = "Diagnostic HUD",
+    Flag = "seroid_HitboxHUD",
+    Default = HitboxConfig.ShowHUD,
     Callback = function(value)
-        local number = tonumber(string.match(value or "", "%((%d+)%)"))
-        if number then
-            controls.FOV:Set(number)
+        HitboxConfig.ShowHUD = value
+
+        if hitboxGui then
+            hitboxGui.Enabled = value
         end
     end,
 })
 
-local cameraButtons = CameraSection:Button()
-cameraButtons:Add("Reset FOV", function()
-    controls.FOVEnabled:Set(false)
-    controls.FOV:Set(70)
-    controls.FOVPreset:Set("Default (70)")
-    applyFOV()
-    notify("Camera reset", "Original camera FOV restored.", "success")
-end)
-
--- Quick profiles use VibeUI's own config system.
-local profileName = "seroid_default"
-
-local profileButtons = ProfileSection:Button()
-profileButtons:Add("Save profile", function()
-    local ok, err = pcall(function()
-        VibeUI:SaveConfig(profileName)
-    end)
-    if ok then
-        notify("Profile saved", "Saved as '" .. profileName .. "'.", "success")
-    else
-        notify("Save failed", tostring(err), "error")
-    end
-end)
-profileButtons:Add("Load profile", function()
-    local ok, err = pcall(function()
-        local config = VibeUI:ReadConfig(profileName)
-        if not config then
-            error("No saved profile named '" .. profileName .. "' was found.")
-        end
-        VibeUI:LoadConfig(config)
-    end)
-    if ok then
-        notify("Profile loaded", "Loaded '" .. profileName .. "'.", "success")
-    else
-        notify("Load failed", tostring(err), "error")
-    end
-end)
-
-local resetButtons = ProfileSection:Button()
-resetButtons:Add("Reset all", function()
-    controls.SpeedEnabled:Set(DEFAULTS.SpeedEnabled)
-    controls.Speed:Set(DEFAULTS.Speed)
-    controls.SpeedPreset:Set("seroid (37)")
-    controls.SmoothMovement:Set(DEFAULTS.SmoothMovement)
-    controls.Smoothing:Set(DEFAULTS.Smoothing)
-    controls.GroundOnly:Set(DEFAULTS.GroundOnly)
-    controls.PreserveVerticalVelocity:Set(DEFAULTS.PreserveVerticalVelocity)
-    controls.JumpEnabled:Set(DEFAULTS.JumpEnabled)
-    controls.JumpMode:Set(DEFAULTS.JumpMode)
-    controls.JumpValue:Set(DEFAULTS.JumpValue)
-    controls.FOVEnabled:Set(DEFAULTS.FOVEnabled)
-    controls.FOV:Set(DEFAULTS.FOV)
-    controls.FOVPreset:Set("Wide (85)")
-    applyJump()
-    applyFOV()
-    notify("Reset complete", "seroid settings returned to their defaults.", "success")
-end)
-
-local infoOK = pcall(function()
-    StatusSection:Paragraph({
-        Name = "Runtime status",
-        Content = "Speed loop: client-side | Default speed: 37 | Menu: Right Ctrl | Speed toggle: Left Ctrl",
-    })
-    StatusSection:Paragraph({
-        Name = "Compatibility",
-        Content = "R6/R15/custom rigs are supported when a Humanoid and root part are available. Some games may override client movement.",
-    })
-    StatusSection:Paragraph({
-        Name = "Safety",
-        Content = "Unload restores captured jump and camera settings and disconnects this script's event connections.",
-    })
-end)
-
--- Add VibeUI's built-in theme, interface, and config settings page.
-pcall(function()
-    VibeUI:CreateSettingsPage(Window)
-end)
-
--- Publish common compatibility values for existing scripts that read them.
-ENV.Speed = state.Speed
-ENV.SpeedEnabled = state.SpeedEnabled
-ENV.Loop = true
-
--- Movement loop: one Heartbeat connection, with safe direction checks.
-track(RunService.Heartbeat:Connect(function(deltaTime)
-    if not alive or not state.SpeedEnabled then
+-- Event-driven player tracking; visual updates use a bounded cadence.
+local function registerHitboxPlayer(targetPlayer)
+    if targetPlayer == player then
         return
     end
 
-    local humanoid = getHumanoid()
-    local root = getRoot()
-    if not humanoid or not root or humanoid.Health <= 0 then
-        return
-    end
+    track(targetPlayer.CharacterAdded:Connect(function()
+        destroyTargetVisual(targetPlayer)
+    end))
 
-    if state.GroundOnly and humanoid.FloorMaterial == Enum.Material.Air then
-        return
-    end
-
-    local direction = humanoid.MoveDirection
-    local flat = Vector3.new(direction.X, 0, direction.Z)
-    local magnitude = flat.Magnitude
-
-    if magnitude < 0.001 then
-        return
-    end
-
-    flat = flat / magnitude
-
-    local velocity = root.AssemblyLinearVelocity
-    local target = Vector3.new(flat.X * state.Speed, velocity.Y, flat.Z * state.Speed)
-
-    if not state.PreserveVerticalVelocity then
-        target = Vector3.new(target.X, 0, target.Z)
-    end
-
-    if state.SmoothMovement then
-        local alpha = 1 - math.pow(1 - state.Smoothing, math.clamp(deltaTime * 60, 0.1, 3))
-        local horizontal = Vector3.new(velocity.X, 0, velocity.Z):Lerp(
-            Vector3.new(target.X, 0, target.Z),
-            alpha
-        )
-        root.AssemblyLinearVelocity = Vector3.new(
-            horizontal.X,
-            target.Y,
-            horizontal.Z
-        )
-    else
-        root.AssemblyLinearVelocity = target
-    end
-end))
-
-track(player.CharacterAdded:Connect(function()
-    task.defer(function()
-        if alive then
-            task.wait(0.15)
-            applyJump()
-        end
-    end)
-end))
-
-track(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-    local newCamera = Workspace.CurrentCamera
-    if not newCamera then
-        return
-    end
-
-    currentCamera = newCamera
-    if state.FOVEnabled then
-        originalFOV = newCamera.FieldOfView
-        applyFOV()
-    else
-        originalFOV = newCamera.FieldOfView
-    end
-end))
-
--- Apply initial settings after controls are constructed.
-task.defer(function()
-    if not alive then
-        return
-    end
-    applyJump()
-    applyFOV()
-    notify("seroid loaded", "Ready. Right Ctrl opens the menu.", "success")
-end)
-
-local function cleanup()
-    if not alive then
-        return
-    end
-    alive = false
-
-    for _, connection in ipairs(connections) do
-        pcall(function()
-            connection:Disconnect()
-        end)
-    end
-    table.clear(connections)
-
-    -- Restore current character's original jump settings.
-    local humanoid = getHumanoid()
-    if humanoid then
-        local saved = originalJump[humanoid]
-        if saved then
-            pcall(function()
-                humanoid.UseJumpPower = saved.UseJumpPower
-                humanoid.JumpPower = saved.JumpPower
-                humanoid.JumpHeight = saved.JumpHeight
-            end)
-        end
-    end
-
-    -- Restore the camera's captured FOV.
-    local camera = Workspace.CurrentCamera
-    if camera and originalFOV then
-        pcall(function()
-            camera.FieldOfView = originalFOV
-        end)
-    end
-
-    ENV.SpeedConnection = nil
-    ENV.SpeedEnabled = false
-    ENV.Loop = false
-    ENV.seroidCleanup = nil
-
-    pcall(function()
-        VibeUI:Unload()
-    end)
+    track(targetPlayer.CharacterRemoving:Connect(function()
+        destroyTargetVisual(targetPlayer)
+    end))
 end
 
-ENV.seroidCleanup = cleanup
-ENV.SpeedConnection = connections[1]
+for _, targetPlayer in ipairs(Players:GetPlayers()) do
+    registerHitboxPlayer(targetPlayer)
+end
 
--- Expose a compact state table for debugging/custom extension.
-ENV.seroid = {
-    Version = "2.0",
-    State = state,
-    Cleanup = cleanup,
-    UI = VibeUI,
-}
+track(Players.PlayerAdded:Connect(registerHitboxPlayer))
+
+track(Players.PlayerRemoving:Connect(function(targetPlayer)
+    destroyTargetVisual(targetPlayer)
+end))
+
+track(RunService.Heartbeat:Connect(function(deltaTime)
+    if not alive then
+        return
+    end
+
+    hitboxElapsed += deltaTime
+    if hitboxElapsed < HitboxConfig.UpdateInterval then
+        return
+    end
+    hitboxElapsed = 0
+
+    if not HitboxConfig.Enabled then
+        return
+    end
+
+    local localCharacter = player.Character
+    local localRoot = localCharacter
+        and localCharacter:FindFirstChild("HumanoidRootPart")
+
+    if not localRoot then
+        return
+    end
+
+    local count = 0
+    local visible = 0
+    local blocked = 0
+    local predictionSum = Vector3.zero
+
+    for _, targetPlayer in ipairs(Players:GetPlayers()) do
+        if targetPlayer ~= player then
+            local character = targetPlayer.Character
+            local humanoid = character
+                and character:FindFirstChildOfClass("Humanoid")
+            local targetPart = getTargetPart(character)
+
+            if humanoid and humanoid.Health > 0 and targetPart then
+                local distance = (targetPart.Position - localRoot.Position).Magnitude
+
+                if distance <= HitboxConfig.MaxDistance then
+                    count += 1
+
+                    local position, offset, color, status =
+                        inspectTarget(targetPlayer, targetPart, localRoot)
+
+                    local proxy = getOrCreateProxy(targetPlayer)
+                    local multiplier = HitboxConfig.Multiplier
+
+                    proxy.Size = targetPart.Size * multiplier
+                    proxy.Shape = HitboxConfig.Shape == "Ball"
+                        and Enum.PartType.Ball
+                        or Enum.PartType.Block
+                    proxy.CFrame = CFrame.new(position)
+                    proxy.Color = color
+                    proxy.Transparency = HitboxConfig.Transparency
+                    proxy.Material = Enum.Material.Neon
+
+                    predictionSum += offset
+
+                    if status == "VISIBLE" then
+                        visible += 1
+                    elseif status == "BLOCKED" then
+                        blocked += 1
+                    end
+
+                    if HitboxConfig.ShowHighlight then
+                        local highlight = getOrCreateHighlight(
+                            targetPlayer,
+                            character
+                        )
+                        highlight.FillColor = color
+                        highlight.OutlineColor = color
+                    elseif hitboxHighlights[targetPlayer] then
+                        hitboxHighlights[targetPlayer]:Destroy()
+                        hitboxHighlights[targetPlayer] = nil
+                    end
+                else
+                    destroyTargetVisual(targetPlayer)
+                end
+            else
+                destroyTargetVisual(targetPlayer)
+            end
+        end
+    end
+
+    hitboxStatus.Targets = count
+    hitboxStatus.Visible = visible
+    hitboxStatus.Blocked = blocked
+    hitboxStatus.Prediction = count > 0
+        and predictionSum / count
+        or Vector3.zero
+
+    updateHitboxHUD()
+end))
+
+-- Add these cleanup lines inside the existing cleanup() function,
+-- before VibeUI:Unload().
+removeHitboxVisuals()
+
+if hitboxGui then
+    hitboxGui:Destroy()
+    hitboxGui = nil
+end
