@@ -44,6 +44,12 @@ local DEFAULTS = {
     HitboxScale = 2.0,
     HitboxTransparency = 0.55,
     HitboxColor = "Purple",
+    HitboxAdaptive = true,
+    HitboxOcclusion = true,
+    HitboxWeaponAwareness = true,
+    HitboxProximity = true,
+    HitboxIndoorScale = 0.80,
+    HitboxOpenScale = 1.25,
 }
 
 local state = {}
@@ -407,8 +413,8 @@ cameraButtons:Add("Reset FOV", function()
     notify("Camera reset", "Original camera FOV restored.", "success")
 end)
 
--- Hitbox visualizer: draws client-side boxes only; never changes character parts,
--- collision, weapon reach, or server-side hit registration.
+-- Adaptive hitbox simulator: local adornments only. It never resizes character parts,
+-- changes collision, extends weapon reach, or modifies server hit registration.
 local hitboxAdornments = {}
 local hitboxColors = {
     Purple = Color3.fromRGB(145, 105, 255),
@@ -417,6 +423,13 @@ local hitboxColors = {
     Green = Color3.fromRGB(90, 235, 145),
     White = Color3.fromRGB(245, 245, 255),
 }
+local simTelemetry = { density = 0, environment = "Unknown", weapon = "None", multiplier = 1 }
+local simGui, simLabel
+local refreshAccumulator = 0
+local lastEnvironmentScan = 0
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
 
 local function removeHitbox(playerToRemove)
     local adornment = hitboxAdornments[playerToRemove]
@@ -426,10 +439,171 @@ local function removeHitbox(playerToRemove)
     end
 end
 
-local function refreshHitboxes()
-    if not alive then
+local function ensureSimulationHud()
+    if simGui and simGui.Parent then return end
+    local playerGui = player:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return end
+
+    simGui = Instance.new("ScreenGui")
+    simGui.Name = "seroid_HitboxTelemetry"
+    simGui.ResetOnSpawn = false
+    simGui.IgnoreGuiInset = true
+    simGui.DisplayOrder = 20
+    simGui.Enabled = state.HitboxVisualsEnabled
+    simGui.Parent = playerGui
+
+    local frame = Instance.new("Frame")
+    frame.Name = "TelemetryPanel"
+    frame.AnchorPoint = Vector2.new(1, 0)
+    frame.Position = UDim2.new(1, -18, 0, 18)
+    frame.Size = UDim2.fromOffset(255, 96)
+    frame.BackgroundColor3 = Color3.fromRGB(16, 17, 25)
+    frame.BackgroundTransparency = 0.12
+    frame.BorderSizePixel = 0
+    frame.Parent = simGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(145, 105, 255)
+    stroke.Transparency = 0.25
+    stroke.Thickness = 1
+    stroke.Parent = frame
+
+    simLabel = Instance.new("TextLabel")
+    simLabel.Name = "Telemetry"
+    simLabel.BackgroundTransparency = 1
+    simLabel.Position = UDim2.fromOffset(11, 8)
+    simLabel.Size = UDim2.new(1, -22, 1, -16)
+    simLabel.Font = Enum.Font.Code
+    simLabel.TextSize = 13
+    simLabel.TextColor3 = Color3.fromRGB(235, 235, 245)
+    simLabel.TextXAlignment = Enum.TextXAlignment.Left
+    simLabel.TextYAlignment = Enum.TextYAlignment.Top
+    simLabel.TextWrapped = true
+    simLabel.Parent = frame
+end
+
+local function updateSimulationHud()
+    ensureSimulationHud()
+    if not simGui then return end
+    simGui.Enabled = state.HitboxVisualsEnabled
+    if not simLabel then return end
+    simLabel.Text = string.format(
+        "SEROID  /  HITBOX SIM\nEnvironment: %s (%d parts)\nWeapon: %s\nPreview multiplier: %.2fx",
+        simTelemetry.environment,
+        simTelemetry.density,
+        simTelemetry.weapon,
+        simTelemetry.multiplier
+    )
+end
+
+local function detectWeapon()
+    if not state.HitboxWeaponAwareness then
+        return "Neutral", 1
+    end
+    local character = player.Character
+    if not character then return "None", 1 end
+
+    for _, child in ipairs(character:GetChildren()) do
+        if child:IsA("Tool") then
+            local name = string.lower(child.Name)
+            if string.find(name, "sniper", 1, true)
+                or string.find(name, "rifle", 1, true)
+                or string.find(name, "railgun", 1, true) then
+                return "Sniper", 1.20
+            elseif string.find(name, "sword", 1, true)
+                or string.find(name, "knife", 1, true)
+                or string.find(name, "melee", 1, true) then
+                return "Melee", 1.12
+            else
+                return "Tool: " .. string.sub(child.Name, 1, 18), 1
+            end
+        end
+    end
+    return "None", 1
+end
+
+local function scanEnvironment()
+    local root = getRoot()
+    if not root then
+        simTelemetry.density = 0
+        simTelemetry.environment = "Unknown"
         return
     end
+
+    local now = os.clock()
+    if now - lastEnvironmentScan < 0.8 then return end
+    lastEnvironmentScan = now
+
+    local overlap = OverlapParams.new()
+    overlap.FilterType = Enum.RaycastFilterType.Exclude
+    overlap.FilterDescendantsInstances = { player.Character }
+    overlap.MaxParts = 160
+
+    local nearby = Workspace:GetPartBoundsInBox(
+        CFrame.new(root.Position),
+        Vector3.new(24, 12, 24),
+        overlap
+    )
+    local count = #nearby
+    simTelemetry.density = count
+
+    local roofParams = RaycastParams.new()
+    roofParams.FilterType = Enum.RaycastFilterType.Exclude
+    roofParams.FilterDescendantsInstances = { player.Character }
+    roofParams.IgnoreWater = true
+    local roof = Workspace:Raycast(root.Position, Vector3.new(0, 22, 0), roofParams)
+
+    if roof or count >= 55 then
+        simTelemetry.environment = "Indoor / dense"
+    else
+        simTelemetry.environment = "Open"
+    end
+end
+
+local function getOccluded(targetRoot)
+    if not state.HitboxOcclusion then return false end
+    local camera = Workspace.CurrentCamera
+    if not camera or not targetRoot then return false end
+
+    local origin = camera.CFrame.Position
+    local direction = targetRoot.Position - origin
+    if direction.Magnitude < 0.01 then return false end
+
+    local excluded = { player.Character, targetRoot.Parent }
+    rayParams.FilterDescendantsInstances = excluded
+    local result = Workspace:Raycast(origin, direction, rayParams)
+    return result ~= nil
+end
+
+local function getAdaptiveMultiplier(targetRoot, weaponMultiplier)
+    local multiplier = state.HitboxScale
+    if state.HitboxAdaptive then
+        multiplier *= (simTelemetry.environment == "Indoor / dense")
+            and state.HitboxIndoorScale or state.HitboxOpenScale
+    end
+
+    if state.HitboxProximity then
+        local root = getRoot()
+        if root and targetRoot then
+            local distance = (targetRoot.Position - root.Position).Magnitude
+            local proximity = math.clamp((distance - 8) / 100, 0, 1)
+            multiplier *= 0.88 + proximity * 0.24
+        end
+    end
+
+    multiplier *= weaponMultiplier or 1
+    return math.clamp(multiplier, 0.5, 8)
+end
+
+local function refreshHitboxes()
+    if not alive then return end
+    scanEnvironment()
+    local weapon, weaponMultiplier = detectWeapon()
+    simTelemetry.weapon = weapon
 
     for _, otherPlayer in ipairs(Players:GetPlayers()) do
         if otherPlayer ~= player then
@@ -446,18 +620,23 @@ local function refreshHitboxes()
                 if not adornment or adornment.Parent == nil then
                     removeHitbox(otherPlayer)
                     adornment = Instance.new("BoxHandleAdornment")
-                    adornment.Name = "seroid_HitboxVisual"
+                    adornment.Name = "seroid_HitboxSimulation"
                     adornment.Adornee = root
-                    adornment.AlwaysOnTop = true
+                    adornment.AlwaysOnTop = false
                     adornment.ZIndex = 5
                     adornment.Parent = root
                     hitboxAdornments[otherPlayer] = adornment
                 end
 
+                local occluded = getOccluded(root)
+                local multiplier = getAdaptiveMultiplier(root, weaponMultiplier)
+                simTelemetry.multiplier = multiplier
                 adornment.Adornee = root
-                adornment.Size = root.Size * state.HitboxScale
-                adornment.Transparency = state.HitboxTransparency
-                adornment.Color3 = hitboxColors[state.HitboxColor] or hitboxColors.Purple
+                adornment.Size = root.Size * multiplier
+                adornment.Transparency = occluded and 0.88 or state.HitboxTransparency
+                adornment.Color3 = occluded
+                    and Color3.fromRGB(255, 165, 75)
+                    or (hitboxColors[state.HitboxColor] or hitboxColors.Purple)
                 adornment.Visible = true
             else
                 removeHitbox(otherPlayer)
@@ -470,13 +649,14 @@ local function refreshHitboxes()
             removeHitbox(trackedPlayer)
         end
     end
+    updateSimulationHud()
 end
 
 controls.HitboxVisualsEnabled = HitboxSection:Toggle({
-    Name = "Enable hitbox visuals",
+    Name = "Enable hitbox simulation",
     Flag = "seroid_HitboxVisualsEnabled",
     Default = DEFAULTS.HitboxVisualsEnabled,
-    Info = "Visual overlay only; does not change real hit detection.",
+    Info = "Local visual simulation only; real hit detection is unchanged.",
     Callback = function(value)
         state.HitboxVisualsEnabled = value
         if not value then
@@ -484,13 +664,15 @@ controls.HitboxVisualsEnabled = HitboxSection:Toggle({
                 removeHitbox(trackedPlayer)
             end
         else
+            ensureSimulationHud()
             refreshHitboxes()
         end
+        updateSimulationHud()
     end,
 })
 
 controls.HitboxScale = HitboxSection:Slider({
-    Name = "Visual box scale",
+    Name = "Base preview scale",
     Flag = "seroid_HitboxScale",
     Min = 1,
     Max = 5,
@@ -528,6 +710,80 @@ controls.HitboxColor = HitboxSection:Dropdown({
     end,
 })
 
+controls.HitboxAdaptive = HitboxSection:Toggle({
+    Name = "Adaptive environment scaling",
+    Flag = "seroid_HitboxAdaptive",
+    Default = DEFAULTS.HitboxAdaptive,
+    Callback = function(value)
+        state.HitboxAdaptive = value
+        refreshHitboxes()
+    end,
+})
+
+controls.HitboxProximity = HitboxSection:Toggle({
+    Name = "Distance compensation preview",
+    Flag = "seroid_HitboxProximity",
+    Default = DEFAULTS.HitboxProximity,
+    Callback = function(value)
+        state.HitboxProximity = value
+        refreshHitboxes()
+    end,
+})
+
+controls.HitboxWeaponAwareness = HitboxSection:Toggle({
+    Name = "Weapon-aware preview",
+    Flag = "seroid_HitboxWeaponAwareness",
+    Default = DEFAULTS.HitboxWeaponAwareness,
+    Callback = function(value)
+        state.HitboxWeaponAwareness = value
+        refreshHitboxes()
+    end,
+})
+
+controls.HitboxOcclusion = HitboxSection:Toggle({
+    Name = "Wall occlusion preview",
+    Flag = "seroid_HitboxOcclusion",
+    Default = DEFAULTS.HitboxOcclusion,
+    Callback = function(value)
+        state.HitboxOcclusion = value
+        refreshHitboxes()
+    end,
+})
+
+controls.HitboxIndoorScale = HitboxSection:Slider({
+    Name = "Indoor multiplier",
+    Flag = "seroid_HitboxIndoorScale",
+    Min = 0.5,
+    Max = 1.5,
+    Default = DEFAULTS.HitboxIndoorScale,
+    Decimals = 0.05,
+    Callback = function(value)
+        state.HitboxIndoorScale = math.clamp(value, 0.5, 1.5)
+        refreshHitboxes()
+    end,
+})
+
+controls.HitboxOpenScale = HitboxSection:Slider({
+    Name = "Open-area multiplier",
+    Flag = "seroid_HitboxOpenScale",
+    Min = 0.75,
+    Max = 2,
+    Default = DEFAULTS.HitboxOpenScale,
+    Decimals = 0.05,
+    Callback = function(value)
+        state.HitboxOpenScale = math.clamp(value, 0.75, 2)
+        refreshHitboxes()
+    end,
+})
+
+-- Right Shift toggles the simulation independently of the Right Ctrl menu.
+track(UserInputService.InputBegan:Connect(function(input, processed)
+    if processed or UserInputService:GetFocusedTextBox() then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        controls.HitboxVisualsEnabled:Set(not state.HitboxVisualsEnabled)
+    end
+end))
+
 track(Players.PlayerAdded:Connect(function(newPlayer)
     if newPlayer ~= player then
         track(newPlayer.CharacterAdded:Connect(function()
@@ -545,8 +801,14 @@ for _, existingPlayer in ipairs(Players:GetPlayers()) do
 end
 
 track(Players.PlayerRemoving:Connect(removeHitbox))
-track(RunService.Heartbeat:Connect(function()
-    if state.HitboxVisualsEnabled then
+track(RunService.Heartbeat:Connect(function(deltaTime)
+    if not state.HitboxVisualsEnabled then
+        refreshAccumulator = 0
+        return
+    end
+    refreshAccumulator += deltaTime
+    if refreshAccumulator >= 0.15 then
+        refreshAccumulator = 0
         refreshHitboxes()
     end
 end))
@@ -599,6 +861,12 @@ resetButtons:Add("Reset all", function()
     controls.HitboxScale:Set(DEFAULTS.HitboxScale)
     controls.HitboxTransparency:Set(DEFAULTS.HitboxTransparency)
     controls.HitboxColor:Set(DEFAULTS.HitboxColor)
+    controls.HitboxAdaptive:Set(DEFAULTS.HitboxAdaptive)
+    controls.HitboxProximity:Set(DEFAULTS.HitboxProximity)
+    controls.HitboxWeaponAwareness:Set(DEFAULTS.HitboxWeaponAwareness)
+    controls.HitboxOcclusion:Set(DEFAULTS.HitboxOcclusion)
+    controls.HitboxIndoorScale:Set(DEFAULTS.HitboxIndoorScale)
+    controls.HitboxOpenScale:Set(DEFAULTS.HitboxOpenScale)
     applyJump()
     applyFOV()
     notify("Reset complete", "seroid settings returned to their defaults.", "success")
@@ -738,9 +1006,14 @@ local function cleanup()
         end
     end
 
-    -- Remove all visual hitbox adornments.
+    -- Remove all visual simulation adornments and telemetry.
     for trackedPlayer in pairs(hitboxAdornments) do
         removeHitbox(trackedPlayer)
+    end
+    if simGui then
+        pcall(function() simGui:Destroy() end)
+        simGui = nil
+        simLabel = nil
     end
 
     -- Restore the camera's captured FOV.
