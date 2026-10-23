@@ -1,0 +1,179 @@
+-- HitboxExpander
+-- Install as a ModuleScript in ServerScriptService in your own Roblox experience.
+-- Server-side hitbox query helpers for owner-authorized admin/testing tools.
+-- This module does not alter client executors or automatically change weapon damage.
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+local HitboxExpander = {}
+
+HitboxExpander.Config = {
+    Enabled = false,
+    Width = 4,   -- studs added to the root part's X size
+    Height = 5,  -- studs added to the root part's Y size
+    Depth = 4,   -- studs added to the root part's Z size
+    MaxExpansion = 20,
+    ShowDebug = false,
+    DebugColor = Color3.fromRGB(145, 105, 255),
+    DebugTransparency = 0.75,
+}
+
+local debugFolder = Workspace:FindFirstChild("SeroidHitboxDebug")
+if not debugFolder then
+    debugFolder = Instance.new("Folder")
+    debugFolder.Name = "SeroidHitboxDebug"
+    debugFolder.Parent = Workspace
+end
+
+local debugByPlayer = {}
+
+local function clampSize(value)
+    return math.clamp(tonumber(value) or 0, 0, HitboxExpander.Config.MaxExpansion)
+end
+
+function HitboxExpander.Configure(options)
+    assert(typeof(options) == "table", "Configure expects a table")
+
+    for key, value in pairs(options) do
+        if HitboxExpander.Config[key] ~= nil then
+            if key == "Width" or key == "Height" or key == "Depth" then
+                HitboxExpander.Config[key] = clampSize(value)
+            elseif key == "Enabled" or key == "ShowDebug" then
+                if typeof(value) == "boolean" then
+                    HitboxExpander.Config[key] = value
+                end
+            elseif key == "DebugColor" then
+                if typeof(value) == "Color3" then
+                    HitboxExpander.Config[key] = value
+                end
+            elseif key == "DebugTransparency" and typeof(value) == "number" then
+                HitboxExpander.Config[key] = math.clamp(value, 0, 1)
+            end
+        end
+    end
+
+    HitboxExpander.RefreshDebug()
+end
+
+function HitboxExpander.GetTargetBox(attacker, target)
+    if not HitboxExpander.Config.Enabled or not attacker or not target or attacker == target then
+        return nil
+    end
+
+    local character = target.Character
+    if not character then
+        return nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or humanoid.Health <= 0 or not root then
+        return nil
+    end
+
+    local extra = Vector3.new(
+        HitboxExpander.Config.Width,
+        HitboxExpander.Config.Height,
+        HitboxExpander.Config.Depth
+    )
+
+    return root.CFrame, root.Size + extra, character, humanoid
+end
+
+-- Returns players whose expanded oriented root box contains the supplied world point.
+-- Call this on the server from your own melee/ability hit validation.
+function HitboxExpander.GetTargetsAtPoint(attacker, worldPoint, maxDistance)
+    local results = {}
+    if not HitboxExpander.Config.Enabled or not attacker or typeof(worldPoint) ~= "Vector3" then
+        return results
+    end
+
+    maxDistance = math.max(0, tonumber(maxDistance) or 12)
+
+    for _, target in ipairs(Players:GetPlayers()) do
+        local boxCFrame, boxSize, character, humanoid =
+            HitboxExpander.GetTargetBox(attacker, target)
+
+        if boxCFrame then
+            local localPoint = boxCFrame:PointToObjectSpace(worldPoint)
+            local half = boxSize * 0.5
+            local inside = math.abs(localPoint.X) <= half.X
+                and math.abs(localPoint.Y) <= half.Y
+                and math.abs(localPoint.Z) <= half.Z
+            local inRange = (boxCFrame.Position - worldPoint).Magnitude <= maxDistance
+
+            if inside and inRange then
+                table.insert(results, {
+                    Player = target,
+                    Character = character,
+                    Humanoid = humanoid,
+                    Root = character:FindFirstChild("HumanoidRootPart"),
+                })
+            end
+        end
+    end
+
+    return results
+end
+
+function HitboxExpander.ClearDebug()
+    for _, part in pairs(debugByPlayer) do
+        if part and part.Parent then
+            part:Destroy()
+        end
+    end
+    table.clear(debugByPlayer)
+end
+
+function HitboxExpander.RefreshDebug()
+    HitboxExpander.ClearDebug()
+
+    if not HitboxExpander.Config.Enabled or not HitboxExpander.Config.ShowDebug then
+        return
+    end
+
+    for _, target in ipairs(Players:GetPlayers()) do
+        local character = target.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+        if root and humanoid and humanoid.Health > 0 then
+            local box = Instance.new("Part")
+            box.Name = target.Name .. "_SeroidHitboxPreview"
+            box.Size = root.Size + Vector3.new(
+                HitboxExpander.Config.Width,
+                HitboxExpander.Config.Height,
+                HitboxExpander.Config.Depth
+            )
+            box.CFrame = root.CFrame
+            box.Anchored = false
+            box.Massless = true
+            box.CanCollide = false
+            box.CanTouch = false
+            box.CanQuery = false
+            box.CastShadow = false
+            box.Material = Enum.Material.ForceField
+            box.Color = HitboxExpander.Config.DebugColor
+            box.Transparency = HitboxExpander.Config.DebugTransparency
+            box.Parent = debugFolder
+
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = root
+            weld.Part1 = box
+            weld.Parent = box
+
+            debugByPlayer[target] = box
+        end
+    end
+end
+
+Players.PlayerRemoving:Connect(function(target)
+    local part = debugByPlayer[target]
+    if part then
+        part:Destroy()
+        debugByPlayer[target] = nil
+    end
+end)
+
+return HitboxExpander
