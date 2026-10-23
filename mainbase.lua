@@ -39,6 +39,11 @@ local DEFAULTS = {
 
     FOVEnabled = false,
     FOV = 85,
+
+    HitboxVisualsEnabled = false,
+    HitboxScale = 2.0,
+    HitboxTransparency = 0.55,
+    HitboxColor = "Purple",
 }
 
 local state = {}
@@ -199,6 +204,7 @@ local JumpSection = MovementTab:Section({ Name = "Jump Control", Side = 2 })
 local VisualsTab = Window:Tab({ Name = "Visuals", Columns = 2 })
 local CameraSection = VisualsTab:Section({ Name = "Camera", Side = 1 })
 local UtilitySection = VisualsTab:Section({ Name = "Utilities", Side = 2 })
+local HitboxSection = VisualsTab:Section({ Name = "Hitbox Visualizer", Side = 2 })
 
 local ConfigTab = Window:Tab({ Name = "Profiles", Columns = 2 })
 local ProfileSection = ConfigTab:Section({ Name = "Quick Profiles", Side = 1 })
@@ -401,6 +407,150 @@ cameraButtons:Add("Reset FOV", function()
     notify("Camera reset", "Original camera FOV restored.", "success")
 end)
 
+-- Hitbox visualizer: draws client-side boxes only; never changes character parts,
+-- collision, weapon reach, or server-side hit registration.
+local hitboxAdornments = {}
+local hitboxColors = {
+    Purple = Color3.fromRGB(145, 105, 255),
+    Red = Color3.fromRGB(255, 85, 95),
+    Cyan = Color3.fromRGB(70, 220, 255),
+    Green = Color3.fromRGB(90, 235, 145),
+    White = Color3.fromRGB(245, 245, 255),
+}
+
+local function removeHitbox(playerToRemove)
+    local adornment = hitboxAdornments[playerToRemove]
+    if adornment then
+        pcall(function() adornment:Destroy() end)
+        hitboxAdornments[playerToRemove] = nil
+    end
+end
+
+local function refreshHitboxes()
+    if not alive then
+        return
+    end
+
+    for _, otherPlayer in ipairs(Players:GetPlayers()) do
+        if otherPlayer ~= player then
+            local character = otherPlayer.Character
+            local root = character and (
+                character:FindFirstChild("HumanoidRootPart")
+                or character:FindFirstChild("Torso")
+                or character:FindFirstChild("UpperTorso")
+            )
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+            if state.HitboxVisualsEnabled and root and humanoid and humanoid.Health > 0 then
+                local adornment = hitboxAdornments[otherPlayer]
+                if not adornment or adornment.Parent == nil then
+                    removeHitbox(otherPlayer)
+                    adornment = Instance.new("BoxHandleAdornment")
+                    adornment.Name = "seroid_HitboxVisual"
+                    adornment.Adornee = root
+                    adornment.AlwaysOnTop = true
+                    adornment.ZIndex = 5
+                    adornment.Parent = root
+                    hitboxAdornments[otherPlayer] = adornment
+                end
+
+                adornment.Adornee = root
+                adornment.Size = root.Size * state.HitboxScale
+                adornment.Transparency = state.HitboxTransparency
+                adornment.Color3 = hitboxColors[state.HitboxColor] or hitboxColors.Purple
+                adornment.Visible = true
+            else
+                removeHitbox(otherPlayer)
+            end
+        end
+    end
+
+    for trackedPlayer in pairs(hitboxAdornments) do
+        if trackedPlayer.Parent ~= Players then
+            removeHitbox(trackedPlayer)
+        end
+    end
+end
+
+controls.HitboxVisualsEnabled = HitboxSection:Toggle({
+    Name = "Enable hitbox visuals",
+    Flag = "seroid_HitboxVisualsEnabled",
+    Default = DEFAULTS.HitboxVisualsEnabled,
+    Info = "Visual overlay only; does not change real hit detection.",
+    Callback = function(value)
+        state.HitboxVisualsEnabled = value
+        if not value then
+            for trackedPlayer in pairs(hitboxAdornments) do
+                removeHitbox(trackedPlayer)
+            end
+        else
+            refreshHitboxes()
+        end
+    end,
+})
+
+controls.HitboxScale = HitboxSection:Slider({
+    Name = "Visual box scale",
+    Flag = "seroid_HitboxScale",
+    Min = 1,
+    Max = 5,
+    Default = DEFAULTS.HitboxScale,
+    Decimals = 0.1,
+    Callback = function(value)
+        state.HitboxScale = math.clamp(value, 1, 5)
+        refreshHitboxes()
+    end,
+})
+
+controls.HitboxTransparency = HitboxSection:Slider({
+    Name = "Box transparency",
+    Flag = "seroid_HitboxTransparency",
+    Min = 0.1,
+    Max = 0.9,
+    Default = DEFAULTS.HitboxTransparency,
+    Decimals = 0.05,
+    Callback = function(value)
+        state.HitboxTransparency = math.clamp(value, 0.1, 0.9)
+        refreshHitboxes()
+    end,
+})
+
+controls.HitboxColor = HitboxSection:Dropdown({
+    Name = "Box color",
+    Flag = "seroid_HitboxColor",
+    Items = { "Purple", "Red", "Cyan", "Green", "White" },
+    Default = DEFAULTS.HitboxColor,
+    Callback = function(value)
+        if hitboxColors[value] then
+            state.HitboxColor = value
+            refreshHitboxes()
+        end
+    end,
+})
+
+track(Players.PlayerAdded:Connect(function(newPlayer)
+    if newPlayer ~= player then
+        track(newPlayer.CharacterAdded:Connect(function()
+            task.defer(refreshHitboxes)
+        end))
+    end
+end))
+
+for _, existingPlayer in ipairs(Players:GetPlayers()) do
+    if existingPlayer ~= player then
+        track(existingPlayer.CharacterAdded:Connect(function()
+            task.defer(refreshHitboxes)
+        end))
+    end
+end
+
+track(Players.PlayerRemoving:Connect(removeHitbox))
+track(RunService.Heartbeat:Connect(function()
+    if state.HitboxVisualsEnabled then
+        refreshHitboxes()
+    end
+end))
+
 -- Quick profiles use VibeUI's own config system.
 local profileName = "seroid_default"
 
@@ -445,6 +595,10 @@ resetButtons:Add("Reset all", function()
     controls.FOVEnabled:Set(DEFAULTS.FOVEnabled)
     controls.FOV:Set(DEFAULTS.FOV)
     controls.FOVPreset:Set("Wide (85)")
+    controls.HitboxVisualsEnabled:Set(DEFAULTS.HitboxVisualsEnabled)
+    controls.HitboxScale:Set(DEFAULTS.HitboxScale)
+    controls.HitboxTransparency:Set(DEFAULTS.HitboxTransparency)
+    controls.HitboxColor:Set(DEFAULTS.HitboxColor)
     applyJump()
     applyFOV()
     notify("Reset complete", "seroid settings returned to their defaults.", "success")
@@ -582,6 +736,11 @@ local function cleanup()
                 humanoid.JumpHeight = saved.JumpHeight
             end)
         end
+    end
+
+    -- Remove all visual hitbox adornments.
+    for trackedPlayer in pairs(hitboxAdornments) do
+        removeHitbox(trackedPlayer)
     end
 
     -- Restore the camera's captured FOV.
