@@ -11,7 +11,7 @@ local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 
 local CONFIG = {
-    Enabled = true,
+    Enabled = false,
     TargetPart = "HumanoidRootPart", -- "Head" or "HumanoidRootPart"
     HitboxSize = Vector3.new(6, 6, 6),
     Color = Color3.fromRGB(70, 220, 120),
@@ -33,6 +33,7 @@ local connections = {}
 local activeCount = 0
 local visibleCount = 0
 local blockedCount = 0
+local averagePrediction = Vector3.zero
 local hudLabel
 
 local oldFolder = Workspace:FindFirstChild(PREVIEW_FOLDER_NAME)
@@ -247,6 +248,7 @@ connect(UserInputService.InputBegan, function(input, processed)
         activeCount = 0
         visibleCount = 0
         blockedCount = 0
+        averagePrediction = Vector3.zero
     end
     updateHUD()
 end)
@@ -272,6 +274,7 @@ connect(RunService.Heartbeat, function(deltaTime)
         activeCount = 0
         visibleCount = 0
         blockedCount = 0
+        averagePrediction = Vector3.zero
         updateHUD()
         return
     end
@@ -279,11 +282,13 @@ connect(RunService.Heartbeat, function(deltaTime)
     activeCount = 0
     visibleCount = 0
     blockedCount = 0
+    local predictionSum = Vector3.zero
 
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
-            local visible = updatePreview(player, localRoot)
+            local visible, offset = updatePreview(player, localRoot)
             if visible ~= nil then
+                predictionSum += offset or Vector3.zero
                 activeCount += 1
                 if visible then
                     visibleCount += 1
@@ -294,6 +299,7 @@ connect(RunService.Heartbeat, function(deltaTime)
         end
     end
 
+    averagePrediction = activeCount > 0 and predictionSum / activeCount or Vector3.zero
     updateHUD()
 end)
 
