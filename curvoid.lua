@@ -42,7 +42,6 @@ local BACK_KEY_COOLDOWN = 2
 local lastBackKeyUse = -math.huge
 local pendingBind = nil
 local VibeUI
-local BIND_NAME = "CurvoidCameraSnap_" .. tostring(player.UserId)
 
 local function track(connection)
     table.insert(connections, connection)
@@ -69,16 +68,47 @@ local function notify(title, description, kind)
     end)
 end
 
+local function restoreSnap(snap)
+    if not snap or not snap.camera then
+        return
+    end
+
+    local camera = snap.camera
+    pcall(function()
+        local canRestoreFrame = camera == Workspace.CurrentCamera
+            and (not snap.changedCameraType or camera.CameraType == Enum.CameraType.Scriptable)
+
+        if canRestoreFrame then
+            camera.CFrame = snap.base
+            if snap.focus then
+                camera.Focus = snap.focus
+            end
+        end
+
+        if snap.changedCameraType and camera.CameraType == Enum.CameraType.Scriptable then
+            camera.CameraType = snap.cameraType
+        end
+    end)
+end
+
+local function finishSnap(token)
+    if token ~= snapToken then
+        return
+    end
+    local snap = activeSnap
+    activeSnap = nil
+    restoreSnap(snap)
+end
+
 local function cleanup()
     if not alive then
         return
     end
     alive = false
-    activeSnap = nil
     snapToken += 1
-    pcall(function()
-        RunService:UnbindFromRenderStep(BIND_NAME)
-    end)
+    local snap = activeSnap
+    activeSnap = nil
+    restoreSnap(snap)
     disconnectAll()
     pcall(function()
         if VibeUI and type(VibeUI.Unload) == "function" then
@@ -97,12 +127,12 @@ local function performSnap(kind, source)
     if source == "key" and not state.HotkeysEnabled then
         return
     end
+
     if kind == "Back" and source == "key" then
         local remaining = BACK_KEY_COOLDOWN - (os.clock() - lastBackKeyUse)
         if remaining > 0 then
             return
         end
-        lastBackKeyUse = os.clock()
     end
 
     local camera = Workspace.CurrentCamera
@@ -118,55 +148,45 @@ local function performSnap(kind, source)
         offset = CFrame.Angles(math.rad(state.UpAngle), 0, 0)
     end
 
+    local originalType = camera.CameraType
+    local duration = math.clamp(state.SnapDuration, 0.03, 0.50)
+
     snapToken += 1
     local token = snapToken
     activeSnap = {
         camera = camera,
         base = camera.CFrame,
-        offset = offset,
-        scriptable = camera.CameraType == Enum.CameraType.Scriptable,
+        focus = camera.Focus,
+        cameraType = originalType,
+        changedCameraType = originalType ~= Enum.CameraType.Scriptable,
     }
 
-    task.delay(state.SnapDuration, function()
-        if not alive or snapToken ~= token then
+    if kind == "Back" and source == "key" then
+        lastBackKeyUse = os.clock()
+    end
+
+    -- Pause the default camera controller briefly instead of fighting it
+    -- with repeated CFrame writes every rendered frame.
+    if originalType ~= Enum.CameraType.Scriptable then
+        camera.CameraType = Enum.CameraType.Scriptable
+    end
+
+    local ok, err = pcall(function()
+        camera.CFrame = activeSnap.base * offset
+    end)
+    if not ok then
+        finishSnap(token)
+        warn("[Curvoid] Could not apply camera snap:", err)
+        return
+    end
+
+    task.delay(duration, function()
+        if not alive then
             return
         end
-        local snap = activeSnap
-        if snap and snap.scriptable and snap.camera == Workspace.CurrentCamera then
-            pcall(function()
-                snap.camera.CFrame = snap.base
-            end)
-        end
-        activeSnap = nil
+        finishSnap(token)
     end)
 end
-
--- Apply the temporary rotation after Roblox's normal camera update.
-RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value + 1, function()
-    local snap = activeSnap
-    if not alive or not snap then
-        return
-    end
-
-    local camera = Workspace.CurrentCamera
-    if not camera then
-        return
-    end
-
-    if snap.camera ~= camera then
-        snap.camera = camera
-        snap.base = camera.CFrame
-        snap.scriptable = camera.CameraType == Enum.CameraType.Scriptable
-    end
-
-    if snap.scriptable then
-        camera.CFrame = snap.base * snap.offset
-    else
-        -- The default camera controller refreshes its base CFrame each frame;
-        -- applying the offset after it avoids accumulating rotation.
-        camera.CFrame = camera.CFrame * snap.offset
-    end
-end)
 
 local libraryURL = "https://sirmemegithub.com/RealSlimShady2000/VibeUI/raw/branch/main/VibeUI.luau"
 local loadOK, libraryOrError = pcall(function()
@@ -178,9 +198,6 @@ local loadOK, libraryOrError = pcall(function()
 end)
 
 if not loadOK or type(libraryOrError) ~= "table" then
-    pcall(function()
-        RunService:UnbindFromRenderStep(BIND_NAME)
-    end)
     warn("[Curvoid] Could not load VibeUI:", libraryOrError)
     return
 end
@@ -322,7 +339,7 @@ pcall(function()
     })
     InfoSection:Paragraph({
         Name = "Cleanup",
-        Content = "Unload removes the render binding and tracked input connections.",
+        Content = "Unload restores temporary camera state and disconnects tracked input connections.",
     })
     VibeUI:CreateSettingsPage(Window)
 end)
