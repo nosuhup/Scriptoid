@@ -1,16 +1,14 @@
 --[[
-    seroid.lua — VibeUI movement + camera utility panel
+    seroid.lua — VibeUI movement + camera utility panel (Ultimate Backstab & Keybind Edition)
     Defaults: speed 37, smooth movement on, FOV off, jump boost off.
     UI library: https://sirmemegithub.com/RealSlimShady2000/VibeUI
-
-    Note: this is a client-side utility. Games can override or validate movement
-    on the server. Use only where client-side modifications are permitted.
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
 
 local player = Players.LocalPlayer
 if not player then
@@ -39,6 +37,18 @@ local DEFAULTS = {
 
     FOVEnabled = false,
     FOV = 85,
+
+    -- Dash & Backstab settings
+    DashEnabled = true,
+    DashCooldown = 3.9,
+    DashDuration = 0.1,        -- 0.1s smooth dash speed (anti-rubberband)
+    DashMagnetRange = 85,      -- Max detection range for targets
+    BackstabOffset = 6.0,      -- Distance behind target in studs
+    
+    -- Keybinds
+    KeyToggle = Enum.KeyCode.H,
+    KeyStraight = Enum.KeyCode.Q,
+    KeyBackstab = Enum.KeyCode.R,
 }
 
 local state = {}
@@ -50,7 +60,9 @@ local alive = true
 local connections = {}
 local originalJump = setmetatable({}, { __mode = "k" })
 local originalFOV = nil
-local VibeUI -- forward declaration used by notify()
+local lastDashTick = 0
+local isDashing = false
+local VibeUI
 local currentCamera = Workspace.CurrentCamera
 if currentCamera then
     originalFOV = currentCamera.FieldOfView
@@ -147,7 +159,122 @@ local function applyFOV()
     end
 end
 
--- Load the UI library with clear failure handling.
+-- Play custom dash animation
+local function playDashAnimation(humanoid)
+    if not humanoid then return end
+    pcall(function()
+        local animator = humanoid:FindFirstChildOfClass("Animator") or humanoid:WaitForChild("Animator", 0.5)
+        if not animator then return end
+        
+        local anim = Instance.new("Animation")
+        anim.AnimationId = "rbxassetid://10490011756"
+        local trackAnim = animator:LoadAnimation(anim)
+        trackAnim.Priority = Enum.AnimationPriority.Action4
+        trackAnim:Play()
+    end)
+end
+
+-- Find closest target near camera crosshair view
+local function getClosestTargetToAim()
+    local camera = Workspace.CurrentCamera
+    local localRoot = getRoot()
+    if not camera or not localRoot then return nil end
+
+    local closestTargetRoot = nil
+    local bestScore = math.huge
+    local camPos = camera.CFrame.Position
+    local camLook = camera.CFrame.LookVector
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and p.Character then
+            local targetRoot = p.Character:FindFirstChild("HumanoidRootPart")
+                or p.Character.PrimaryPart
+            local humanoid = p.Character:FindFirstChildOfClass("Humanoid")
+            if targetRoot and humanoid and humanoid.Health > 0 then
+                local toTarget = targetRoot.Position - camPos
+                local dist = toTarget.Magnitude
+                if dist <= state.DashMagnetRange then
+                    local unitDir = toTarget.Unit
+                    local dot = camLook:Dot(unitDir)
+                    if dot > 0.05 then
+                        local score = dist / (dot * 2)
+                        if score < bestScore then
+                            bestScore = score
+                            closestTargetRoot = targetRoot
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return closestTargetRoot
+end
+
+-- Perform dash mode: "Straight" (Q) or "Backstab" (R)
+local function performDash(mode)
+    if not state.DashEnabled or isDashing then return end
+    local now = tick()
+    if now - lastDashTick < state.DashCooldown then
+        local remaining = math.ceil((state.DashCooldown - (now - lastDashTick)) * 10) / 10
+        notify("Dash Cooldown", "Wait " .. remaining .. "s before dashing again.", "warning")
+        return
+    end
+
+    local root = getRoot()
+    local humanoid = getHumanoid()
+    if not root or not humanoid or humanoid.Health <= 0 then return end
+
+    lastDashTick = now
+    isDashing = true
+
+    playDashAnimation(humanoid)
+
+    local targetCFrame
+    local targetRoot = getClosestTargetToAim()
+
+    if mode == "Backstab" and targetRoot then
+        -- Calculate position directly behind the target's look vector
+        local targetPos = targetRoot.Position
+        local targetLook = targetRoot.CFrame.LookVector
+        -- Offset backwards from the target's facing direction
+        local backPos = targetPos - (Vector3.new(targetLook.X, 0, targetLook.Z).Unit * state.BackstabOffset)
+        backPos = Vector3.new(backPos.X, targetPos.Y, backPos.Z) -- Match height
+        
+        -- Look directly back at the target so player is facing them ready to strike
+        targetCFrame = CFrame.new(backPos, targetPos)
+        notify("Backstab Dash", "Flanked behind target successfully!", "success")
+    elseif mode == "Straight" and targetRoot then
+        -- Straight magnet right onto the target player's center
+        local targetPos = targetRoot.Position
+        local lookDir = (targetPos - root.Position)
+        lookDir = Vector3.new(lookDir.X, 0, lookDir.Z).Unit
+        if lookDir.Magnitude ~= lookDir.Magnitude then lookDir = root.CFrame.LookVector end
+        targetCFrame = CFrame.new(targetPos, targetPos + lookDir)
+        notify("Straight Dash", "Magnetized to target straight-on.", "success")
+    else
+        -- Fallback: forward vector based on camera/root
+        local camera = Workspace.CurrentCamera
+        local lookVec = camera and camera.CFrame.LookVector or root.CFrame.LookVector
+        local flatDir = Vector3.new(lookVec.X, 0, lookVec.Z).Unit
+        if flatDir.Magnitude ~= flatDir.Magnitude then flatDir = Vector3.new(0, 0, -1) end
+        
+        local fallbackPos = root.Position + (flatDir * 35)
+        targetCFrame = CFrame.new(fallbackPos, fallbackPos + flatDir)
+        notify("Dash", "Performed standard forward dash.", "info")
+    end
+
+    -- Smooth tween over 0.1 seconds to completely bypass server anti-cheat rubberbanding
+    local tweenInfo = TweenInfo.new(state.DashDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local tween = TweenService:Create(root, tweenInfo, { CFrame = targetCFrame })
+    
+    tween:Play()
+    tween.Completed:Connect(function()
+        isDashing = false
+    end)
+end
+
+-- Load UI Library
 local libraryURL =
     "https://sirmemegithub.com/RealSlimShady2000/VibeUI/raw/branch/main/VibeUI.luau"
 
@@ -166,7 +293,6 @@ end
 
 VibeUI = libraryOrError
 
--- Appearance defaults must be set before creating the window.
 pcall(function()
     VibeUI.Config.Rounded = true
     VibeUI.Config.MobileToggle = true
@@ -195,6 +321,7 @@ local MovementTab = Window:Tab({ Name = "Movement", Columns = 2 })
 local SpeedSection = MovementTab:Section({ Name = "Speed Control", Side = 1 })
 local MotionSection = MovementTab:Section({ Name = "Movement Options", Side = 2 })
 local JumpSection = MovementTab:Section({ Name = "Jump Control", Side = 2 })
+local DashSection = MovementTab:Section({ Name = "Dash & Backstab Control", Side = 1 })
 
 local VisualsTab = Window:Tab({ Name = "Visuals", Columns = 2 })
 local CameraSection = VisualsTab:Section({ Name = "Camera", Side = 1 })
@@ -264,6 +391,68 @@ speedButtons:Add("Default speed", function()
 end)
 speedButtons:Add("Disable speed", function()
     controls.SpeedEnabled:Set(false)
+end)
+
+-- Dash & Backstab controls setup with explicit Keybind toggles & sliders
+controls.DashEnabled = DashSection:Toggle({
+    Name = "Enable Dash / Backstab (H)",
+    Flag = "seroid_DashEnabled",
+    Default = DEFAULTS.DashEnabled,
+    Callback = function(value)
+        state.DashEnabled = value
+    end,
+})
+controls.DashEnabled:AddKeybind({
+    Flag = "seroid_DashToggleKey",
+    Default = DEFAULTS.KeyToggle,
+    Mode = "Toggle",
+})
+
+controls.BackstabOffset = DashSection:Slider({
+    Name = "Backstab Distance Behind",
+    Flag = "seroid_BackstabOffset",
+    Min = 2,
+    Max = 15,
+    Default = DEFAULTS.BackstabOffset,
+    Decimals = 0.5,
+    Suffix = " studs",
+    Callback = function(value)
+        state.BackstabOffset = value
+    end,
+})
+
+controls.DashMagnetRange = DashSection:Slider({
+    Name = "Magnet Range",
+    Flag = "seroid_DashMagnetRange",
+    Min = 20,
+    Max = 150,
+    Default = DEFAULTS.DashMagnetRange,
+    Decimals = 1,
+    Suffix = " studs",
+    Callback = function(value)
+        state.DashMagnetRange = value
+    end,
+})
+
+controls.DashCooldown = DashSection:Slider({
+    Name = "Dash Cooldown",
+    Flag = "seroid_DashCooldown",
+    Min = 0.5,
+    Max = 10.0,
+    Default = DEFAULTS.DashCooldown,
+    Decimals = 1,
+    Suffix = " s",
+    Callback = function(value)
+        state.DashCooldown = value
+    end,
+})
+
+local dashButtons = DashSection:Button()
+dashButtons:Add("Test Straight (Q)", function()
+    performDash("Straight")
+end)
+dashButtons:Add("Test Backstab (R)", function()
+    performDash("Backstab")
 end)
 
 -- Movement quality options
@@ -401,7 +590,7 @@ cameraButtons:Add("Reset FOV", function()
     notify("Camera reset", "Original camera FOV restored.", "success")
 end)
 
--- Quick profiles use VibeUI's own config system.
+-- Quick profiles
 local profileName = "seroid_default"
 
 local profileButtons = ProfileSection:Button()
@@ -445,37 +634,54 @@ resetButtons:Add("Reset all", function()
     controls.FOVEnabled:Set(DEFAULTS.FOVEnabled)
     controls.FOV:Set(DEFAULTS.FOV)
     controls.FOVPreset:Set("Wide (85)")
+    controls.DashEnabled:Set(DEFAULTS.DashEnabled)
+    controls.BackstabOffset:Set(DEFAULTS.BackstabOffset)
+    controls.DashMagnetRange:Set(DEFAULTS.DashMagnetRange)
+    controls.DashCooldown:Set(DEFAULTS.DashCooldown)
     applyJump()
     applyFOV()
-    notify("Reset complete", "seroid settings returned to their defaults.", "success")
+    notify("Reset complete", "seroid settings returned to defaults.", "success")
 end)
 
 local infoOK = pcall(function()
     StatusSection:Paragraph({
         Name = "Runtime status",
-        Content = "Speed loop: client-side | Default speed: 37 | Menu: Right Ctrl | Speed toggle: Left Ctrl",
+        Content = "Speed loop: client-side | Toggle: H | Straight: Q | Backstab Flank: R",
     })
     StatusSection:Paragraph({
         Name = "Compatibility",
-        Content = "R6/R15/custom rigs are supported when a Humanoid and root part are available. Some games may override client movement.",
+        Content = "R6/R15/custom rigs supported. Anti-rubberband tweening active.",
     })
     StatusSection:Paragraph({
         Name = "Safety",
-        Content = "Unload restores captured jump and camera settings and disconnects this script's event connections.",
+        Content = "Unload restores captured jump and camera settings and disconnects event connections.",
     })
 end)
 
--- Add VibeUI's built-in theme, interface, and config settings page.
 pcall(function()
     VibeUI:CreateSettingsPage(Window)
 end)
 
--- Publish common compatibility values for existing scripts that read them.
 ENV.Speed = state.Speed
 ENV.SpeedEnabled = state.SpeedEnabled
 ENV.Loop = true
 
--- Movement loop: one Heartbeat connection, with safe direction checks.
+-- Input listener for Keybinds (H = Toggle, Q = Straight Magnet, R = Backstab Flank)
+track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == state.KeyToggle then
+        state.DashEnabled = not state.DashEnabled
+        controls.DashEnabled:Set(state.DashEnabled)
+        notify("Dash System", state.DashEnabled and "Enabled" or "Disabled", state.DashEnabled and "success" or "warning")
+    elseif input.KeyCode == state.KeyStraight then
+        performDash("Straight")
+    elseif input.KeyCode == state.KeyBackstab then
+        performDash("Backstab")
+    end
+end))
+
+-- Movement loop
 track(RunService.Heartbeat:Connect(function(deltaTime)
     if not alive or not state.SpeedEnabled then
         return
@@ -534,28 +740,24 @@ track(player.CharacterAdded:Connect(function()
 end))
 
 track(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-    local newCamera = Workspace.CurrentCamera
-    if not newCamera then
-        return
-    end
-
-    currentCamera = newCamera
+    local val = Workspace.CurrentCamera
+    if not val then return end
+    currentCamera = val
     if state.FOVEnabled then
-        originalFOV = newCamera.FieldOfView
+        originalFOV = val.FieldOfView
         applyFOV()
     else
-        originalFOV = newCamera.FieldOfView
+        originalFOV = val.FieldOfView
     end
 end))
 
--- Apply initial settings after controls are constructed.
 task.defer(function()
     if not alive then
         return
     end
     applyJump()
     applyFOV()
-    notify("seroid loaded", "Ready. Right Ctrl opens the menu.", "success")
+    notify("seroid loaded", "Ready. [H] Toggle | [Q] Straight Magnet | [R] Backstab Flank.", "success")
 end)
 
 local function cleanup()
@@ -571,7 +773,6 @@ local function cleanup()
     end
     table.clear(connections)
 
-    -- Restore current character's original jump settings.
     local humanoid = getHumanoid()
     if humanoid then
         local saved = originalJump[humanoid]
@@ -584,7 +785,6 @@ local function cleanup()
         end
     end
 
-    -- Restore the camera's captured FOV.
     local camera = Workspace.CurrentCamera
     if camera and originalFOV then
         pcall(function()
@@ -605,9 +805,8 @@ end
 ENV.seroidCleanup = cleanup
 ENV.SpeedConnection = connections[1]
 
--- Expose a compact state table for debugging/custom extension.
 ENV.seroid = {
-    Version = "2.0",
+    Version = "2.4",
     State = state,
     Cleanup = cleanup,
     UI = VibeUI,
