@@ -38,6 +38,8 @@ local alive = true
 local connections = {}
 local activeSnap = nil
 local snapToken = 0
+local BACK_KEY_COOLDOWN = 2
+local lastBackKeyUse = -math.huge
 local pendingBind = nil
 local VibeUI
 local BIND_NAME = "CurvoidCameraSnap_" .. tostring(player.UserId)
@@ -94,6 +96,13 @@ local function performSnap(kind, source)
     end
     if source == "key" and not state.HotkeysEnabled then
         return
+    end
+    if kind == "Back" and source == "key" then
+        local remaining = BACK_KEY_COOLDOWN - (os.clock() - lastBackKeyUse)
+        if remaining > 0 then
+            return
+        end
+        lastBackKeyUse = os.clock()
     end
 
     local camera = Workspace.CurrentCamera
@@ -305,7 +314,7 @@ pcall(function()
     })
     InfoSection:Paragraph({
         Name = "Default controls",
-        Content = "Q / F: instant 180° backward camera snap for 0.20 seconds, then return to the normal view. R: upward camera snap (45°).",
+        Content = "Q / F: instant 180° backward camera snap for 0.20 seconds, then return to normal view. Keyboard backward snaps have a shared 2-second cooldown. R: upward camera snap (45°).",
     })
     InfoSection:Paragraph({
         Name = "Interface",
