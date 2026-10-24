@@ -3,11 +3,11 @@
     Made by vel1ous
     Companion to seroid.lua. Uses the same VibeUI layout and library.
     Defaults: Q/F = instant 180-degree backward snap for 0.20 seconds, R = upward snap.
+    Snaps temporarily take camera control so the default controller is not overwritten each frame.
 ]]
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
