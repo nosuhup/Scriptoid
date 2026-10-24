@@ -6,6 +6,18 @@ A configurable Roblox movement and camera utility built with [VibeUI](https://pa
 
 > **Status:** Experimental. Compatibility and individual features have not been verified across every executor, avatar rig, or Roblox experience.
 
+## Companion script: Curvoid
+
+`curvoid.lua` is a separate, standalone black-and-cyan camera utility. It does not replace or modify `seroid.lua` and does not require VibeUI or an external HTTP-loaded UI library.
+
+- **Backward snap** — Q or F briefly rotates the camera 180 degrees, then restores it.
+- **Upward snap** — R briefly tilts the camera upward; the default angle is 45 degrees.
+- **Controls UI** — Rebind the main hotkeys, enable or disable hotkeys, and adjust snap duration and upward angle.
+- **About page** — Displays Curvoid, version v1.0.0, and creator vel1ous.
+- **Cleanup** — The window's close button disconnects the script's event connections and removes its UI.
+
+To use Curvoid, run `curvoid.lua` separately as a LocalScript in `StarterPlayerScripts` or in a compatible client-side Luau test environment. Check the rules of the experience before using client-side camera modifications.
+
 ## Features
 
 - **Speed control** — Adjustable speed with presets.
@@ -26,10 +38,11 @@ The script depends on external library hosting, so loading may fail if the sourc
 
 ## Installation
 
-1. Review `seroid.lua` before running it.
-2. Confirm that your environment supports the required APIs and that using client-side modifications is permitted in your test environment.
-3. Run the script.
-4. Use the menu to adjust settings and test individual features.
+1. Review the script you intend to run: `seroid.lua` or `curvoid.lua`.
+2. For `seroid.lua`, install/access the VibeUI dependency and confirm that the environment supports its APIs.
+3. For `curvoid.lua`, no external UI dependency is required; run it separately as a LocalScript in `StarterPlayerScripts` or in a compatible client-side Luau test environment.
+4. Confirm that client-side modifications are permitted in your test environment.
+5. Run only the script you want to test, then verify its controls in a controlled experience.
 
 This project is intended for learning, experimentation, and authorized testing. Do not use it to disrupt other players or bypass rules in experiences where modifications are prohibited.
 
