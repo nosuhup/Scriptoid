@@ -38,6 +38,7 @@ local alive = true
 local connections = {}
 local activeSnap = nil
 local snapToken = 0
+local pendingBind = nil
 local VibeUI
 local BIND_NAME = "CurvoidCameraSnap_" .. tostring(player.UserId)
 
@@ -277,12 +278,24 @@ controls.UpAngle = TimingSection:Slider({
 local quickButtons = QuickSection:Button()
 quickButtons:Add("Reset settings", function()
     state.HotkeysEnabled = DEFAULTS.HotkeysEnabled
+    state.BackKey = DEFAULTS.BackKey
+    state.BackAliasKey = DEFAULTS.BackAliasKey
+    state.UpKey = DEFAULTS.UpKey
     state.SnapDuration = DEFAULTS.SnapDuration
     state.UpAngle = DEFAULTS.UpAngle
     controls.HotkeysEnabled:Set(DEFAULTS.HotkeysEnabled)
     controls.SnapDuration:Set(DEFAULTS.SnapDuration)
     controls.UpAngle:Set(DEFAULTS.UpAngle)
+    pendingBind = nil
     notify("Curvoid reset", "Settings returned to defaults.", "success")
+end)
+quickButtons:Add("Rebind backward key", function()
+    pendingBind = "Back"
+    notify("Rebind backward", "Press a key. F remains as a backup shortcut.", "info")
+end)
+quickButtons:Add("Rebind upward key", function()
+    pendingBind = "Up"
+    notify("Rebind upward", "Press a key to use for the upward snap.", "info")
 end)
 
 pcall(function()
@@ -306,10 +319,29 @@ pcall(function()
 end)
 
 track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if not alive or gameProcessed or UserInputService:GetFocusedTextBox() then
+    if not alive or UserInputService:GetFocusedTextBox() then
         return
     end
-    if not state.HotkeysEnabled then
+
+    if pendingBind and not gameProcessed then
+        if input.KeyCode == Enum.KeyCode.Escape then
+            pendingBind = nil
+            notify("Rebind cancelled", "The previous key remains active.", "info")
+            return
+        end
+        if input.KeyCode ~= Enum.KeyCode.Unknown then
+            if pendingBind == "Back" then
+                state.BackKey = input.KeyCode
+            else
+                state.UpKey = input.KeyCode
+            end
+            pendingBind = nil
+            notify("Keybind saved", "New shortcut: " .. input.KeyCode.Name, "success")
+            return
+        end
+    end
+
+    if gameProcessed or not state.HotkeysEnabled then
         return
     end
 
