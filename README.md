@@ -1,99 +1,179 @@
-# seroid
+# Scriptoid
 
-A configurable Roblox movement and camera utility built with [VibeUI](https://pages.sirmemegithub.com/VibeUI/).
+A configurable Roblox client-side movement and camera utility collection written in Luau.
 
-`seroid` provides a single interface for adjusting movement speed, jump settings, and camera field of view, alongside movement options and configuration controls.
+Scriptoid currently contains two separate scripts:
 
-> **Status:** Experimental. Compatibility and individual features have not been verified across every executor, avatar rig, or Roblox experience.
+- **`seroid.lua`** — movement, jump, dash, and camera field-of-view controls powered by VibeUI.
+- **`curvoid.lua`** — a standalone camera utility with a fast, eased backward turn and return animation.
 
-## Companion script: Curvoid
+> [!IMPORTANT]
+> These scripts modify client-side behavior. Compatibility depends on the Roblox experience, client environment, avatar rig, and external dependencies. Use them only in experiences you own or in environments where these modifications are explicitly permitted. This project is not affiliated with Roblox.
 
-`curvoid.lua` is a separate, standalone black-and-cyan camera utility. It does not replace or modify `seroid.lua` and does not require VibeUI or an external HTTP-loaded UI library.
+## Contents
 
-- **Backward snap** — Q or F briefly rotates the camera 180 degrees, then restores it.
-- **Upward snap** — R briefly tilts the camera upward; the default angle is 45 degrees.
-- **Controls UI** — Rebind the main hotkeys, enable or disable hotkeys, and adjust snap duration and upward angle.
-- **About page** — Displays Curvoid, version v1.0.0, and creator vel1ous.
-- **Cleanup** — The window's close button disconnects the script's event connections and removes its UI.
+- [Scripts at a glance](#scripts-at-a-glance)
+- [Features](#features)
+- [Controls](#controls)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Configuration and cleanup](#configuration-and-cleanup)
+- [Troubleshooting](#troubleshooting)
+- [Compatibility and limitations](#compatibility-and-limitations)
+- [Development](#development)
+- [License](#license)
 
-To use Curvoid, run `curvoid.lua` separately as a LocalScript in `StarterPlayerScripts` or in a compatible client-side Luau test environment. Check the rules of the experience before using client-side camera modifications.
+## Scripts at a glance
+
+| File | Purpose | UI dependency |
+|---|---|---|
+| `seroid.lua` | Movement tuning, jump controls, dash options, and camera FOV | [VibeUI](https://pages.sirmemegithub.com/VibeUI/) |
+| `curvoid.lua` | Smooth backward camera turn, return animation, upward camera action, and motion settings | Uses VibeUI for its controls UI; check the source for current loader behavior |
+
+The scripts are independent. Run only the one you intend to test. **The `seroid.lua` source is intentionally unchanged by the repository documentation and naming update.**
 
 ## Features
 
-- **Speed control** — Adjustable speed with presets.
-- **Movement options** — Smooth acceleration, smoothing strength, grounded-only mode, and vertical velocity handling.
-- **Jump control** — Toggleable jump boost with power and height modes.
-- **Camera settings** — Adjustable field of view, presets, and reset controls.
-- **Configuration** — Quick profile save/load controls and a reset-to-defaults option.
-- **Interface** — VibeUI-based menu, theme settings, and notifications.
-- **Cleanup** — Disconnects tracked event connections and attempts to restore captured camera and jump settings.
+### `seroid.lua`
+
+- **Movement speed:** adjustable speed slider and presets.
+- **Movement feel:** smoothing strength, grounded-only behavior, and vertical-velocity handling.
+- **Jump controls:** enable/disable jump boost and choose Power or Height mode.
+- **Dash options:** configurable dash cooldown, dash duration, target range, and backstab offset.
+- **Camera FOV:** toggle custom field of view, use presets, and restore the captured value.
+- **Profiles:** save/load a quick profile and reset the main controls.
+- **UI and notifications:** VibeUI tabs, controls, status information, and notifications.
+- **Cleanup:** tracks event connections and attempts to restore captured jump and camera settings when unloaded.
+
+### `curvoid.lua`
+
+- **F — backward turn:** a fast, eased 180° camera turn followed by a return animation.
+- **R — upward camera action:** angle is adjustable.
+- **Motion tuning:** separate turn, hold, and return durations.
+- **Angle and cooldown controls:** adjustable backward angle and F cooldown.
+- **Hotkey settings:** enable/disable hotkeys and rebind actions.
+- **Quick actions:** reset settings and cancel the active camera motion.
+- **Cleanup:** cancels active tweens and attempts to restore the prior camera mode.
+
+Check the current source for exact defaults and behavior; the UI and scripts may evolve independently.
+
+## Controls
+
+### `seroid.lua` defaults
+
+| Action | Default |
+|---|---|
+| Open/close UI | Right Ctrl |
+| Toggle speed | Left Ctrl (toggle binding on the speed control) |
+| Toggle dash/backstab system | H |
+| Straight dash action | Q |
+| Backstab/flank action | R |
+| Speed | 37 studs/s |
+| Jump boost | Off |
+| Custom FOV | Off |
+| Dash cooldown | 3.9 seconds |
+
+Some bindings are configured both in the UI and in the script. The behavior of UI keybinds can vary with the installed VibeUI version.
+
+### `curvoid.lua` defaults
+
+| Action | Default |
+|---|---|
+| Backward camera turn | F |
+| Upward camera action | R |
+| Open/close UI | Right Ctrl |
+| Backward turn angle | 180° |
+| Turn duration | 0.09 seconds |
+| Hold duration | 0.05 seconds |
+| Return duration | 0.09 seconds |
+| F cooldown | 2 seconds |
+
+Curvoid's default turn, hold, and return sequence is approximately 0.23 seconds. Frame rate, camera mode, and other local scripts can affect the perceived result.
 
 ## Requirements
 
-- A compatible Luau environment with the APIs required by the script.
-- Access to the VibeUI library.
-- A Roblox character with a `Humanoid` and a suitable root part for movement features.
+### For `seroid.lua`
 
-The script depends on external library hosting, so loading may fail if the source is unavailable or the environment blocks HTTP requests.
+- A compatible client-side Luau environment.
+- Access to the [VibeUI library](https://pages.sirmemegithub.com/VibeUI/).
+- A local player character with a `Humanoid` and a suitable root part for movement controls.
+- An environment that supports the Roblox APIs used by the script.
 
-## Installation
+### For `curvoid.lua`
 
-1. Review the script you intend to run: `seroid.lua` or `curvoid.lua`.
-2. For `seroid.lua`, install/access the VibeUI dependency and confirm that the environment supports its APIs.
-3. For `curvoid.lua`, no external UI dependency is required; run it separately as a LocalScript in `StarterPlayerScripts` or in a compatible client-side Luau test environment.
-4. Confirm that client-side modifications are permitted in your test environment.
-5. Run only the script you want to test, then verify its controls in a controlled experience.
+- A compatible client-side Luau environment.
+- The UI library and loader behavior required by the current source.
+- Permission to modify the camera in the experience being tested.
 
-This project is intended for learning, experimentation, and authorized testing. Do not use it to disrupt other players or bypass rules in experiences where modifications are prohibited.
+External dependencies may become unavailable or change without notice. Review their source and license before relying on them.
 
-## Default controls
+## Setup
 
-| Control | Default |
-|---|---|
-| Menu toggle | Right Ctrl |
-| Speed toggle | Left Ctrl |
-| Default speed | 37 |
-| Default jump boost | Off |
-| Custom FOV | Off |
+1. Read the source file you intend to use.
+2. Review the dependency and API requirements above.
+3. Confirm that the experience permits the intended client-side modifications.
+4. Run the script in an isolated test experience first.
+5. Test the controls individually and verify that the camera, movement, and jump settings return to their expected state after unloading.
 
-Hotkey behavior can depend on the UI library version and the execution environment.
+Do not run unknown code simply because it is hosted on GitHub. Review remote dependencies and avoid sharing authentication tokens, account credentials, or private executor logs.
 
-## Configuration
+## Configuration and cleanup
 
-The interface includes controls for speed, movement smoothing, jump mode and value, camera FOV, and quick profiles.
+- Use each script's UI to adjust supported settings.
+- Start with conservative values and change one setting at a time.
+- Use the reset controls if a configuration produces unexpected behavior.
+- Unload the script before switching environments or testing another version.
+- Cleanup is best-effort: if another script changes the same properties, the final restored value may differ from the original value.
 
-Some configuration features depend on the installed VibeUI version. Test saving and loading profiles before relying on them.
+## Troubleshooting
+
+**The UI does not appear**
+- Check the console for dependency-loading errors.
+- Verify that the UI library is reachable and compatible with the script's expected API.
+- Confirm that the environment supports the required APIs.
+
+**A hotkey does nothing**
+- Make sure the UI is not capturing the key and that the hotkey toggle is enabled.
+- Check for conflicts with the experience's own controls.
+- Verify the current key assignments in the script and UI.
+
+**Movement or camera behavior is inconsistent**
+- Test in a simple, permitted test place.
+- Check whether the experience or another local script overrides movement or camera properties.
+- Remember that client-side changes may not be authoritative or replicated by the server.
+
+**Settings do not restore exactly**
+- Unload the script and inspect the current camera and character state.
+- Another script, respawn, or camera replacement can interfere with restoration.
+- Restart the test session if the environment remains in an unexpected state.
 
 ## Compatibility and limitations
 
-- R6, R15, and custom rigs may behave differently.
-- Some experiences override movement locally or validate movement on the server.
-- Executor APIs differ; compatibility with a specific executor is not guaranteed.
-- The UI library is hosted externally and may change independently of this project.
-- The script attempts to restore captured settings when unloaded, but restoration cannot be guaranteed if another script modifies the same properties.
+- R6, R15, and custom character rigs may behave differently.
+- Roblox experiences may replace or validate movement and camera behavior.
+- Client-side changes do not guarantee server-side effects or replication.
+- External libraries and client environments can change independently.
+- The scripts have not been verified across every experience, client version, or avatar setup.
+- Cleanup attempts to restore captured state but cannot guarantee restoration if the environment changes concurrently.
 
-## Dependencies
+## Development
 
-- [VibeUI repository](https://sirmemegithub.com/RealSlimShady2000/VibeUI)
-- [VibeUI documentation](https://pages.sirmemegithub.com/VibeUI/)
+When reporting an issue, include:
 
-Review third-party dependencies and their licenses before redistributing them.
+- The script name and the feature involved.
+- Steps to reproduce the behavior.
+- Any relevant error message, with personal information removed.
+- The environment and avatar rig used for testing.
+- Whether the problem occurs in a clean test place.
 
-## Contributing
-
-Bug reports and constructive suggestions are welcome. When reporting an issue, include:
-
-- The feature that failed.
-- The error message, if any.
-- The relevant environment and avatar rig.
-- Steps to reproduce the problem.
-
-Do not include account credentials, authentication tokens, or other private information in issues.
-
-## Disclaimer
-
-This is an independent community project and is not affiliated with or endorsed by Roblox or the VibeUI maintainers. Use it responsibly and follow the applicable platform rules.
+Keep changes focused and document behavior changes in the README. Avoid committing credentials, tokens, private logs, or unrelated user data.
 
 ## License
 
-No license has been selected yet. Unless a license is added, others should not assume they have permission to redistribute or modify this project's code. See [Choose a License](https://choosealicense.com/) before selecting one.
+**No license is currently specified.** Until a license is added, do not assume that redistribution or modification is permitted. See [Choose a License](https://choosealicense.com/) to select an appropriate license.
+
+---
+
+**Project name:** Scriptoid  
+**Language:** Luau  
+**Platform:** Roblox  
