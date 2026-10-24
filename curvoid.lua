@@ -1,13 +1,14 @@
 --[[
-    Curvoid v1.0.0 — Camera Snap Utility
+    Curvoid v1.1.0 — Smooth Camera Snap Utility
     Made by vel1ous
     Companion to seroid.lua. Uses the same VibeUI layout and library.
-    Defaults: Q/F = instant 180-degree backward snap for 0.20 seconds, R = upward snap.
-    Snaps temporarily take camera control so the default controller is not overwritten each frame.
+    Defaults: F = fast eased 180-degree backward turn and smooth return; R = upward snap.
+    Turn, hold, return, angle, and cooldown settings are adjustable in the UI.
 ]]
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
@@ -23,10 +24,14 @@ end
 
 local DEFAULTS = {
     HotkeysEnabled = true,
-    BackKey = Enum.KeyCode.Q,
-    BackAliasKey = Enum.KeyCode.F,
+    BackKey = Enum.KeyCode.F,
+    BackAliasKey = Enum.KeyCode.Unknown,
     UpKey = Enum.KeyCode.R,
-    SnapDuration = 0.20,
+    TurnDuration = 0.09,
+    HoldDuration = 0.05,
+    ReturnDuration = 0.09,
+    BackAngle = 180,
+    BackCooldown = 2,
     UpAngle = 45,
 }
 local state = {}
@@ -38,7 +43,6 @@ local alive = true
 local connections = {}
 local activeSnap = nil
 local snapToken = 0
-local BACK_KEY_COOLDOWN = 2
 local lastBackKeyUse = -math.huge
 local pendingBind = nil
 local VibeUI
@@ -68,6 +72,31 @@ local function notify(title, description, kind)
     end)
 end
 
+local function cancelSnapMotion(snap)
+    if not snap then
+        return
+    end
+
+    if snap.holdThread then
+        pcall(task.cancel, snap.holdThread)
+        snap.holdThread = nil
+    end
+
+    if snap.completion then
+        pcall(function()
+            snap.completion:Disconnect()
+        end)
+        snap.completion = nil
+    end
+
+    if snap.tween then
+        pcall(function()
+            snap.tween:Cancel()
+        end)
+        snap.tween = nil
+    end
+end
+
 local function restoreSnap(snap)
     if not snap or not snap.camera then
         return
@@ -75,8 +104,8 @@ local function restoreSnap(snap)
 
     local camera = snap.camera
     pcall(function()
-        local canRestoreFrame = camera == Workspace.CurrentCamera
-            and (not snap.changedCameraType or camera.CameraType == Enum.CameraType.Scriptable)
+        local canRestoreFrame = not snap.changedCameraType
+            or camera.CameraType == Enum.CameraType.Scriptable
 
         if canRestoreFrame then
             camera.CFrame = snap.base
@@ -95,8 +124,10 @@ local function finishSnap(token)
     if token ~= snapToken then
         return
     end
+
     local snap = activeSnap
     activeSnap = nil
+    cancelSnapMotion(snap)
     restoreSnap(snap)
 end
 
@@ -104,20 +135,60 @@ local function cleanup()
     if not alive then
         return
     end
+
     alive = false
     snapToken += 1
+
     local snap = activeSnap
     activeSnap = nil
+    cancelSnapMotion(snap)
     restoreSnap(snap)
     disconnectAll()
+
     pcall(function()
         if VibeUI and type(VibeUI.Unload) == "function" then
             VibeUI:Unload()
         end
     end)
+
     if ENV.curvoidCleanup == cleanup then
         ENV.curvoidCleanup = nil
     end
+end
+
+-- Tween the camera instead of snapping CFrame repeatedly in a render loop.
+local function animateSnap(snap, target, duration, easingDirection, onComplete)
+    local tween = TweenService:Create(
+        snap.camera,
+        TweenInfo.new(
+            math.clamp(duration, 0.03, 0.30),
+            Enum.EasingStyle.Quart,
+            easingDirection
+        ),
+        { CFrame = target }
+    )
+
+    snap.tween = tween
+    local connection
+    connection = tween.Completed:Connect(function(playbackState)
+        if connection then
+            connection:Disconnect()
+        end
+        if snap.completion == connection then
+            snap.completion = nil
+        end
+        if snap.tween == tween then
+            snap.tween = nil
+        end
+
+        if not alive or activeSnap ~= snap or playbackState ~= Enum.PlaybackState.Completed then
+            return
+        end
+
+        onComplete()
+    end)
+    snap.completion = connection
+    tween:Play()
 end
 
 local function performSnap(kind, source)
@@ -129,7 +200,7 @@ local function performSnap(kind, source)
     end
 
     if kind == "Back" and source == "key" then
-        local remaining = BACK_KEY_COOLDOWN - (os.clock() - lastBackKeyUse)
+        local remaining = state.BackCooldown - (os.clock() - lastBackKeyUse)
         if remaining > 0 then
             return
         end
@@ -141,51 +212,67 @@ local function performSnap(kind, source)
         return
     end
 
+    local angle = kind == "Back" and state.BackAngle or state.UpAngle
     local offset
     if kind == "Back" then
-        offset = CFrame.Angles(0, math.pi, 0)
+        offset = CFrame.Angles(0, math.rad(angle), 0)
     else
-        offset = CFrame.Angles(math.rad(state.UpAngle), 0, 0)
+        offset = CFrame.Angles(math.rad(angle), 0, 0)
     end
 
     local originalType = camera.CameraType
-    local duration = math.clamp(state.SnapDuration, 0.03, 0.50)
-
     snapToken += 1
     local token = snapToken
-    activeSnap = {
+    local snap = {
         camera = camera,
         base = camera.CFrame,
         focus = camera.Focus,
         cameraType = originalType,
         changedCameraType = originalType ~= Enum.CameraType.Scriptable,
+        tween = nil,
+        completion = nil,
+        holdThread = nil,
     }
+    activeSnap = snap
 
     if kind == "Back" and source == "key" then
         lastBackKeyUse = os.clock()
     end
 
-    -- Pause the default camera controller briefly instead of fighting it
-    -- with repeated CFrame writes every rendered frame.
-    if originalType ~= Enum.CameraType.Scriptable then
+    -- Take temporary camera control so Roblox's default camera script does
+    -- not compete with the tween. The original camera mode is restored later.
+    if snap.changedCameraType then
         camera.CameraType = Enum.CameraType.Scriptable
     end
 
-    local ok, err = pcall(function()
-        camera.CFrame = activeSnap.base * offset
-    end)
-    if not ok then
-        finishSnap(token)
-        warn("[Curvoid] Could not apply camera snap:", err)
-        return
-    end
-
-    task.delay(duration, function()
-        if not alive then
+    local function beginReturn()
+        snap.holdThread = nil
+        if not alive or activeSnap ~= snap then
             return
         end
-        finishSnap(token)
+
+        local ok, err = pcall(function()
+            animateSnap(snap, snap.base, state.ReturnDuration, Enum.EasingDirection.In, function()
+                finishSnap(token)
+            end)
+        end)
+        if not ok then
+            warn("[Curvoid] Return tween failed:", err)
+            finishSnap(token)
+        end
+    end
+
+    local ok, err = pcall(function()
+        local target = snap.base * offset
+        animateSnap(snap, target, state.TurnDuration, Enum.EasingDirection.Out, function()
+            snap.holdThread = task.delay(state.HoldDuration, beginReturn)
+        end)
     end)
+
+    if not ok then
+        warn("[Curvoid] Turn tween failed:", err)
+        finishSnap(token)
+    end
 end
 
 local libraryURL = "https://sirmemegithub.com/RealSlimShady2000/VibeUI/raw/branch/main/VibeUI.luau"
@@ -220,8 +307,8 @@ pcall(function()
 end)
 
 local Window = VibeUI:Window({
-    Title = "Curvoid",
-    Size = UDim2.fromOffset(700, 510),
+    Title = "Curvoid v1.1",
+    Size = UDim2.fromOffset(760, 570),
     Keybind = Enum.KeyCode.RightControl,
     Layout = "Side",
     Resizable = true,
@@ -234,7 +321,8 @@ local QuickSection = ControlsTab:Section({ Name = "Quick Actions", Side = 1 })
 
 local SettingsTab = Window:Tab({ Name = "Settings", Columns = 2 })
 local KeySection = SettingsTab:Section({ Name = "Keyboard", Side = 1 })
-local TimingSection = SettingsTab:Section({ Name = "Snap Settings", Side = 2 })
+local TimingSection = SettingsTab:Section({ Name = "Motion", Side = 2 })
+local AngleSection = SettingsTab:Section({ Name = "Angles", Side = 1 })
 
 local AboutTab = Window:Tab({ Name = "About", Columns = 2 })
 local AboutSection = AboutTab:Section({ Name = "Curvoid", Side = 1 })
@@ -243,7 +331,7 @@ local InfoSection = AboutTab:Section({ Name = "Runtime & Controls", Side = 2 })
 local controls = {}
 
 controls.Backward = BackSection:Toggle({
-    Name = "Enable backward hotkeys (Q / F)",
+    Name = "Enable backward hotkey (F)",
     Flag = "curvoid_BackwardEnabled",
     Default = true,
     Callback = function(value)
@@ -276,19 +364,67 @@ controls.HotkeysEnabled = KeySection:Toggle({
         state.HotkeysEnabled = value
     end,
 })
-controls.SnapDuration = TimingSection:Slider({
-    Name = "Snap duration",
-    Flag = "curvoid_SnapDuration",
+controls.TurnDuration = TimingSection:Slider({
+    Name = "Turn duration",
+    Flag = "curvoid_TurnDuration",
     Min = 0.03,
-    Max = 0.50,
-    Default = DEFAULTS.SnapDuration,
+    Max = 0.30,
+    Default = DEFAULTS.TurnDuration,
     Decimals = 0.01,
     Suffix = " s",
     Callback = function(value)
-        state.SnapDuration = math.clamp(value, 0.03, 0.50)
+        state.TurnDuration = math.clamp(value, 0.03, 0.30)
     end,
 })
-controls.UpAngle = TimingSection:Slider({
+controls.HoldDuration = TimingSection:Slider({
+    Name = "Hold at turned view",
+    Flag = "curvoid_HoldDuration",
+    Min = 0,
+    Max = 0.20,
+    Default = DEFAULTS.HoldDuration,
+    Decimals = 0.01,
+    Suffix = " s",
+    Callback = function(value)
+        state.HoldDuration = math.clamp(value, 0, 0.20)
+    end,
+})
+controls.ReturnDuration = TimingSection:Slider({
+    Name = "Return duration",
+    Flag = "curvoid_ReturnDuration",
+    Min = 0.03,
+    Max = 0.30,
+    Default = DEFAULTS.ReturnDuration,
+    Decimals = 0.01,
+    Suffix = " s",
+    Callback = function(value)
+        state.ReturnDuration = math.clamp(value, 0.03, 0.30)
+    end,
+})
+controls.BackCooldown = KeySection:Slider({
+    Name = "F cooldown",
+    Flag = "curvoid_BackCooldown",
+    Min = 0.5,
+    Max = 5,
+    Default = DEFAULTS.BackCooldown,
+    Decimals = 0.1,
+    Suffix = " s",
+    Callback = function(value)
+        state.BackCooldown = math.clamp(value, 0.5, 5)
+    end,
+})
+controls.BackAngle = AngleSection:Slider({
+    Name = "Backward turn angle",
+    Flag = "curvoid_BackAngle",
+    Min = 90,
+    Max = 180,
+    Default = DEFAULTS.BackAngle,
+    Decimals = 1,
+    Suffix = "°",
+    Callback = function(value)
+        state.BackAngle = math.clamp(value, 90, 180)
+    end,
+})
+controls.UpAngle = AngleSection:Slider({
     Name = "Upward angle",
     Flag = "curvoid_UpAngle",
     Min = 5,
@@ -304,34 +440,55 @@ controls.UpAngle = TimingSection:Slider({
 local quickButtons = QuickSection:Button()
 quickButtons:Add("Reset settings", function()
     state.HotkeysEnabled = DEFAULTS.HotkeysEnabled
+    state.BackwardEnabled = true
+    state.UpwardEnabled = true
     state.BackKey = DEFAULTS.BackKey
     state.BackAliasKey = DEFAULTS.BackAliasKey
     state.UpKey = DEFAULTS.UpKey
-    state.SnapDuration = DEFAULTS.SnapDuration
+    state.TurnDuration = DEFAULTS.TurnDuration
+    state.HoldDuration = DEFAULTS.HoldDuration
+    state.ReturnDuration = DEFAULTS.ReturnDuration
+    state.BackCooldown = DEFAULTS.BackCooldown
+    state.BackAngle = DEFAULTS.BackAngle
     state.UpAngle = DEFAULTS.UpAngle
+    lastBackKeyUse = -math.huge
+    controls.Backward:Set(true)
+    controls.Upward:Set(true)
     controls.HotkeysEnabled:Set(DEFAULTS.HotkeysEnabled)
-    controls.SnapDuration:Set(DEFAULTS.SnapDuration)
+    controls.TurnDuration:Set(DEFAULTS.TurnDuration)
+    controls.HoldDuration:Set(DEFAULTS.HoldDuration)
+    controls.ReturnDuration:Set(DEFAULTS.ReturnDuration)
+    controls.BackCooldown:Set(DEFAULTS.BackCooldown)
+    controls.BackAngle:Set(DEFAULTS.BackAngle)
     controls.UpAngle:Set(DEFAULTS.UpAngle)
     pendingBind = nil
     notify("Curvoid reset", "Settings returned to defaults.", "success")
 end)
 quickButtons:Add("Rebind backward key", function()
     pendingBind = "Back"
-    notify("Rebind backward", "Press a key. F remains as a backup shortcut.", "info")
+    notify("Rebind backward", "Press a key to replace F. Q is not an active alias by default.", "info")
 end)
 quickButtons:Add("Rebind upward key", function()
     pendingBind = "Up"
     notify("Rebind upward", "Press a key to use for the upward snap.", "info")
 end)
+quickButtons:Add("Cancel current snap", function()
+    if activeSnap then
+        finishSnap(snapToken)
+        notify("Camera restored", "The current snap was cancelled.", "success")
+    else
+        notify("Camera idle", "No snap is currently running.", "info")
+    end
+end)
 
 pcall(function()
     AboutSection:Paragraph({
-        Name = "Curvoid v1.0.0",
+        Name = "Curvoid v1.1.0",
         Content = "Made by vel1ous. Standalone camera snap utility and companion to seroid.lua.",
     })
     InfoSection:Paragraph({
         Name = "Default controls",
-        Content = "Q / F: instant 180° backward camera snap for 0.20 seconds, then return to normal view. Keyboard backward snaps have a shared 2-second cooldown. R: upward camera snap (45°).",
+        Content = "F: fast, eased backward camera turn and smooth return. Tune turn time, hold time, return time, angle, and cooldown in Settings. R: upward camera snap; its angle is adjustable.",
     })
     InfoSection:Paragraph({
         Name = "Interface",
@@ -339,7 +496,7 @@ pcall(function()
     })
     InfoSection:Paragraph({
         Name = "Cleanup",
-        Content = "Unload restores temporary camera state and disconnects tracked input connections.",
+        Content = "Motion uses TweenService rather than a permanent render loop. Unload cancels active tweens, restores the camera mode, and disconnects tracked input connections.",
     })
     VibeUI:CreateSettingsPage(Window)
 end)
@@ -371,7 +528,8 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
         return
     end
 
-    if input.KeyCode == state.BackKey or input.KeyCode == state.BackAliasKey then
+    if input.KeyCode == state.BackKey
+        or (state.BackAliasKey ~= Enum.KeyCode.Unknown and input.KeyCode == state.BackAliasKey) then
         if state.BackwardEnabled ~= false then
             performSnap("Back", "key")
         end
@@ -383,5 +541,5 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
 end))
 
 ENV.curvoidCleanup = cleanup
-notify("Curvoid loaded", "Ready. [Q/F] Backward | [R] Upward | Right Ctrl opens the menu.", "success")
-warn("[Curvoid] v1.0.0 loaded. Backward: Q/F | Upward: R.")
+notify("Curvoid loaded", "Ready. [F] Smooth backward turn | [R] Upward | Right Ctrl opens the menu.", "success")
+warn("[Curvoid] v1.1.0 loaded. Backward: F | Upward: R.")
