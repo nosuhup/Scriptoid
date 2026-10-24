@@ -472,7 +472,7 @@ local function performSnap(kind, source)
     end)
 end
 
-track(RunService.RenderStepped:Connect(function()
+RunService:BindToRenderStep(BIND_NAME, Enum.RenderPriority.Camera.Value + 1, function()
     local snap = activeSnap
     if not alive or not snap then
         return
@@ -495,7 +495,7 @@ track(RunService.RenderStepped:Connect(function()
         -- from the fresh camera transform, so the offset never accumulates.
         camera.CFrame = camera.CFrame * snap.offset
     end
-end))
+end)
 
 track(backActionButton.Activated:Connect(function()
     performSnap("Back", "button")
