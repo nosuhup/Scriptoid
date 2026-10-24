@@ -2,7 +2,7 @@
     Curvoid v1.0.0 — Camera Snap Utility
     Made by vel1ous
     Companion to seroid.lua. Uses the same VibeUI layout and library.
-    Defaults: Q/F = backward snap, R = upward snap.
+    Defaults: Q/F = instant 180-degree backward snap for 0.20 seconds, R = upward snap.
 ]]
 
 local Players = game:GetService("Players")
@@ -26,7 +26,7 @@ local DEFAULTS = {
     BackKey = Enum.KeyCode.Q,
     BackAliasKey = Enum.KeyCode.F,
     UpKey = Enum.KeyCode.R,
-    SnapDuration = 0.10,
+    SnapDuration = 0.20,
     UpAngle = 45,
 }
 local state = {}
@@ -305,7 +305,7 @@ pcall(function()
     })
     InfoSection:Paragraph({
         Name = "Default controls",
-        Content = "Q / F: backward camera snap (180°). R: upward camera snap (45°).",
+        Content = "Q / F: instant 180° backward camera snap for 0.20 seconds, then return to the normal view. R: upward camera snap (45°).",
     })
     InfoSection:Paragraph({
         Name = "Interface",
