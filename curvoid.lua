@@ -223,12 +223,6 @@ controls.Backward = BackSection:Toggle({
         state.BackwardEnabled = value
     end,
 })
-controls.Backward: AddKeybind({
-    Flag = "curvoid_BackwardToggleKey",
-    Default = Enum.KeyCode.Unknown,
-    Mode = "Toggle",
-})
-
 local backButtons = BackSection:Button()
 backButtons:Add("Snap backward now", function()
     performSnap("Back", "button")
